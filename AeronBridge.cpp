@@ -14,6 +14,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <queue>
 
 // ===============================
 // Protocol (must match publisher)
@@ -54,10 +55,10 @@ static std::atomic<int> g_started{ 0 };
 static std::mutex  g_errMutex;
 static std::string g_lastError;
 
-// last valid signal CSV
+// Signal queue (instead of single slot)
 static std::mutex  g_sigMutex;
-static std::string g_lastSignalCsv;
-static std::atomic<int> g_hasSignal{ 0 };
+static std::queue<std::string> g_signalQueue;
+static constexpr size_t MAX_QUEUE_SIZE = 100;  // Prevent unbounded growth
 
 // Instrument mapping + conversion config
 struct InstMap
@@ -192,8 +193,8 @@ static void ensureDefaultMap()
     // Defaults (adjust/override from MQL5 via AeronBridge_RegisterInstrumentMapW)
     // Example asked: ES -> SPX500
     g_map["ES"] = InstMap{ "SPX500", 0.25, 0.1 };
-    // Common: NQ -> NAS100
-    g_map["NQ"] = InstMap{ "NAS100", 0.25, 0.1 };
+    // Common: NQ -> NAS100/TECH100
+    g_map["NQ"] = InstMap{ "TECH100", 0.25, 0.1 };
 }
 
 // ===============================
@@ -273,8 +274,12 @@ static void onFragment(
 
     {
         std::lock_guard<std::mutex> lock(g_sigMutex);
-        g_lastSignalCsv = csv;
-        g_hasSignal.store(1, std::memory_order_release);
+        // Queue the signal instead of overwriting
+        if (g_signalQueue.size() < MAX_QUEUE_SIZE)
+        {
+            g_signalQueue.push(std::string(csv));
+        }
+        // else: drop oldest or newest - here we drop newest if full
     }
 }
 
@@ -410,24 +415,25 @@ int AeronBridge_Poll()
 
 int AeronBridge_HasSignal()
 {
-    return g_hasSignal.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(g_sigMutex);
+    return g_signalQueue.empty() ? 0 : 1;
 }
 
 int AeronBridge_GetSignalCsv(unsigned char* outBuf, int outBufLen)
 {
     if (!outBuf || outBufLen <= 1) return 0;
-    if (!g_hasSignal.load(std::memory_order_acquire)) return 0;
 
     std::lock_guard<std::mutex> lock(g_sigMutex);
-    if (g_lastSignalCsv.empty()) return 0;
+    if (g_signalQueue.empty()) return 0;
 
-    const int n = (int)g_lastSignalCsv.size();
+    const std::string& csv = g_signalQueue.front();
+    const int n = (int)csv.size();
     const int copyN = (n >= outBufLen) ? (outBufLen - 1) : n;
 
-    std::memcpy(outBuf, g_lastSignalCsv.data(), (size_t)copyN);
+    std::memcpy(outBuf, csv.data(), (size_t)copyN);
     outBuf[copyN] = 0;
 
-    g_hasSignal.store(0, std::memory_order_release);
+    g_signalQueue.pop();  // Remove from queue after reading
     return copyN;
 }
 
@@ -453,11 +459,12 @@ void AeronBridge_Stop()
 
     g_asyncSub = nullptr;
     g_started.store(0);
-    g_hasSignal.store(0);
 
     {
         std::lock_guard<std::mutex> lock(g_sigMutex);
-        g_lastSignalCsv.clear();
+        // Clear the queue
+        while (!g_signalQueue.empty())
+            g_signalQueue.pop();
     }
 }
 
