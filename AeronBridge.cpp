@@ -71,6 +71,11 @@ struct InstMap
 static std::mutex g_mapMutex;
 static std::unordered_map<std::string, InstMap> g_map;
 
+// Unmapped symbol behavior
+static std::atomic<int> g_allowUnmapped{ 0 };
+static double g_defaultTickSize = 0.01;
+static double g_defaultPointSize = 0.01;
+
 // ===============================
 // Helpers
 // ===============================
@@ -195,6 +200,8 @@ static void ensureDefaultMap()
     g_map["ES"] = InstMap{ "SPX500", 0.25, 0.1 };
     // Common: NQ -> NAS100/TECH100
     g_map["NQ"] = InstMap{ "TECH100", 0.25, 0.1 };
+    // YM -> US30
+    g_map["YM"] = InstMap{ "DJ30", 0.25, 0.1 };
 }
 
 // ===============================
@@ -242,15 +249,34 @@ static void onFragment(
     const std::string prefix = futPrefixFromInstrument(inst);
 
     InstMap map;
+    bool isMapped = false;
     {
         std::lock_guard<std::mutex> lock(g_mapMutex);
         auto it = g_map.find(prefix);
         if (it == g_map.end())
         {
-            // Reject unknown instruments (safe)
-            return;
+            // Unknown instrument prefix
+            if (g_allowUnmapped.load())
+            {
+                // Pass-through mode: use prefix as symbol with default conversion
+                map.mt5Symbol = prefix;
+                map.futTickSize = g_defaultTickSize;
+                map.mt5PointSize = g_defaultPointSize;
+                isMapped = false;  // Mark as unmapped for logging
+            }
+            else
+            {
+                // Strict mode: reject unknown instruments
+                std::string msg = "DROPPED SIGNAL: Unknown instrument prefix '" + prefix + "' from instrument '" + inst + "'. Register mapping via AeronBridge_RegisterInstrumentMapW() or enable pass-through with AeronBridge_SetUnmappedBehaviorW()";
+                setError(msg);
+                return;
+            }
         }
-        map = it->second;
+        else
+        {
+            map = it->second;
+            isMapped = true;
+        }
     }
 
     const int slPoints = ticksToMt5Points(slTicks, map);
@@ -479,4 +505,22 @@ int AeronBridge_LastError(unsigned char* outBuf, int outBufLen)
     std::memcpy(outBuf, g_lastError.data(), (size_t)copyN);
     outBuf[copyN] = 0;
     return copyN;
+}
+
+int AeronBridge_SetUnmappedBehaviorW(
+    int allowUnmapped,
+    double defaultTickSize,
+    double defaultPointSize)
+{
+    if (defaultTickSize <= 0.0 || defaultPointSize <= 0.0)
+    {
+        setError("SetUnmappedBehavior: tick/point sizes must be > 0");
+        return 0;
+    }
+
+    g_allowUnmapped.store(allowUnmapped ? 1 : 0);
+    g_defaultTickSize = defaultTickSize;
+    g_defaultPointSize = defaultPointSize;
+
+    return 1;
 }

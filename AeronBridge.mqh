@@ -12,6 +12,8 @@ int  AeronBridge_StartW(
 // 
 int  AeronBridge_RegisterInstrumentMapW(string futPrefix, string mt5Symbol, double futTickSize, double mt5PointSize);
 
+// Configure unmapped symbol behavior
+int  AeronBridge_SetUnmappedBehaviorW(int allowUnmapped, double defaultTickSize, double defaultPointSize);
 
 // Poll subscription
 int  AeronBridge_Poll();

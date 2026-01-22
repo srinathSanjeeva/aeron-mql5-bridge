@@ -30,6 +30,16 @@ extern "C" {
         double futTickSize,
         double mt5PointSize);
 
+    // Configure unmapped symbol behavior
+    // allowUnmapped: 1 = pass-through unmapped symbols with prefix as symbol, 0 = drop them (default)
+    // defaultTickSize: tick size to use for unmapped instruments (e.g. 0.01)
+    // defaultPointSize: point size to use for unmapped instruments (e.g. 0.01)
+    // Returns 1 on success.
+    __declspec(dllexport) int AeronBridge_SetUnmappedBehaviorW(
+        int allowUnmapped,
+        double defaultTickSize,
+        double defaultPointSize);
+
     // Poll Aeron (call on timer/tick).
     __declspec(dllexport) int AeronBridge_Poll();
 
