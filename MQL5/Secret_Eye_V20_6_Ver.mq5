@@ -1985,69 +1985,6 @@ void OpenBuyPositions()
         lastPublishedSignalId = signalId;
     }
     
-    // ===============================================
-    // V20.5 - Aeron Binary Signal Publishing
-    // ===============================================
-    if(EnableAeronPublishing)
-    {
-        // Use AeronInstrumentName for both symbol and instrument, or fallback to _Symbol
-        string aeronName = (StringLen(AeronInstrumentName) > 0) ? AeronInstrumentName : ExtractSymbolPrefix(_Symbol);
-        string symbol = aeronName;
-        string instrument = aeronName;
-        
-        // Calculate confidence based on stochastic values
-        double mainBuffer[], signalBuffer[];
-        ArraySetAsSeries(mainBuffer, true);
-        ArraySetAsSeries(signalBuffer, true);
-        
-        float confidence = 80.0;
-        if(CopyBuffer(stochHandle, 0, 0, 3, mainBuffer) > 0 && 
-           CopyBuffer(stochHandle, 1, 0, 3, signalBuffer) > 0)
-        {
-            double K = mainBuffer[0];
-            double D = signalBuffer[0];
-            confidence = (float)MathMin(50.0 + MathAbs(K - D), 95.0);
-        }
-        
-        // Publish LongEntry1 (stop loss only)
-        bool pub1 = AeronPublishSignal(
-            symbol,
-            instrument,
-            AERON_LONG_ENTRY1,
-            SL,
-            0,
-            0,
-            1,
-            confidence,
-            AeronSourceTag
-        );
-        
-        if(pub1)
-        {
-            PrintFormat("[AERON_PUB] ✅ LongEntry1: %s SL=%d qty=1 conf=%.1f", symbol, SL, confidence);
-        }
-        
-        // Publish LongEntry2 (stop loss + profit target)
-        int profitOffset = (int)(TP * 0.4);
-        bool pub2 = AeronPublishSignal(
-            symbol,
-            instrument,
-            AERON_LONG_ENTRY2,
-            SL,
-            0,
-            SL + profitOffset,
-            1,
-            confidence,
-            AeronSourceTag
-        );
-        
-        if(pub2)
-        {
-            PrintFormat("[AERON_PUB] ✅ LongEntry2: %s SL=%d TP=%d qty=1 conf=%.1f", 
-                        symbol, SL, SL + profitOffset, confidence);
-        }
-    }
-    
     MqlTick latest_tick;
     SymbolInfoTick(_Symbol, latest_tick);
     double ask = latest_tick.ask;
@@ -2111,6 +2048,69 @@ void OpenBuyPositions()
         Print("Error Code: ", GetLastError());
         Print("RetCode: ", trade.ResultRetcode());
     }
+
+    // ===============================================
+    // V20.6 - Aeron Binary Signal Publishing (AFTER successful trades)
+    // ===============================================
+    if(EnableAeronPublishing && (scalpBuyOpened || trendBuyOpened))
+    {
+        // Use AeronInstrumentName for both symbol and instrument, or fallback to _Symbol
+        string aeronName = (StringLen(AeronInstrumentName) > 0) ? AeronInstrumentName : ExtractSymbolPrefix(_Symbol);
+        string symbol = aeronName;
+        string instrument = aeronName;
+
+        // Calculate confidence based on stochastic values
+        double mainBuffer[], signalBuffer[];
+        ArraySetAsSeries(mainBuffer, true);
+        ArraySetAsSeries(signalBuffer, true);
+
+        float confidence = 80.0;
+        if(CopyBuffer(stochHandle, 0, 0, 3, mainBuffer) > 0 &&
+           CopyBuffer(stochHandle, 1, 0, 3, signalBuffer) > 0)
+        {
+            double K = mainBuffer[0];
+            double D = signalBuffer[0];
+            confidence = (float)MathMin(50.0 + MathAbs(K - D), 95.0);
+        }
+
+        // Publish LongEntry1 (stop loss only)
+        bool pub1 = AeronPublishSignal(
+            symbol,
+            instrument,
+            AERON_LONG_ENTRY1,
+            SL,
+            0,
+            0,
+            1,
+            confidence,
+            AeronSourceTag
+        );
+
+        if(pub1)
+        {
+            PrintFormat("[AERON_PUB] ✅ LongEntry1: %s SL=%d qty=1 conf=%.1f", symbol, SL, confidence);
+        }
+
+        // Publish LongEntry2 (stop loss + profit target)
+        int profitOffset = (int)(TP * 0.4);
+        bool pub2 = AeronPublishSignal(
+            symbol,
+            instrument,
+            AERON_LONG_ENTRY2,
+            SL,
+            0,
+            SL + profitOffset,
+            1,
+            confidence,
+            AeronSourceTag
+        );
+
+        if(pub2)
+        {
+            PrintFormat("[AERON_PUB] ✅ LongEntry2: %s SL=%d TP=%d qty=1 conf=%.1f",
+                        symbol, SL, SL + profitOffset, confidence);
+        }
+    }
 }
 
 /**
@@ -2162,68 +2162,6 @@ void OpenSellPositions()
         
         publishFlags |= PUBLISH_FLAG_SIGNAL;
         lastPublishedSignalId = signalId;
-    }
-    
-    // ===============================================
-    // V20.5 - Aeron Binary Signal Publishing
-    // ===============================================
-    if(EnableAeronPublishing)
-    {
-        // Use AeronInstrumentName for both symbol and instrument, or fallback to _Symbol
-        string aeronName = (StringLen(AeronInstrumentName) > 0) ? AeronInstrumentName : ExtractSymbolPrefix(_Symbol);
-        string symbol = aeronName;
-        string instrument = aeronName;
-        
-        double mainBuffer[], signalBuffer[];
-        ArraySetAsSeries(mainBuffer, true);
-        ArraySetAsSeries(signalBuffer, true);
-        
-        float confidence = 80.0;
-        if(CopyBuffer(stochHandle, 0, 0, 3, mainBuffer) > 0 && 
-           CopyBuffer(stochHandle, 1, 0, 3, signalBuffer) > 0)
-        {
-            double K = mainBuffer[0];
-            double D = signalBuffer[0];
-            confidence = (float)MathMin(50.0 + MathAbs(K - D), 95.0);
-        }
-        
-        // Publish ShortEntry1 (stop loss only)
-        bool pub1 = AeronPublishSignal(
-            symbol,
-            instrument,
-            AERON_SHORT_ENTRY1,
-            0,
-            SL,
-            0,
-            1,
-            confidence,
-            AeronSourceTag
-        );
-        
-        if(pub1)
-        {
-            PrintFormat("[AERON_PUB] ✅ ShortEntry1: %s SL=%d qty=1 conf=%.1f", symbol, SL, confidence);
-        }
-        
-        // Publish ShortEntry2 (stop loss + profit target)
-        int profitOffset = (int)(TP * 0.4);
-        bool pub2 = AeronPublishSignal(
-            symbol,
-            instrument,
-            AERON_SHORT_ENTRY2,
-            0,
-            SL,
-            SL + profitOffset,
-            1,
-            confidence,
-            AeronSourceTag
-        );
-        
-        if(pub2)
-        {
-            PrintFormat("[AERON_PUB] ✅ ShortEntry2: %s SL=%d TP=%d qty=1 conf=%.1f", 
-                        symbol, SL, SL + profitOffset, confidence);
-        }
     }
     
     MqlTick latest_tick;
@@ -2288,6 +2226,68 @@ void OpenSellPositions()
         Print("=== TREND SELL ORDER FAILURE ===");
         Print("Error Code: ", GetLastError());
         Print("RetCode: ", trade.ResultRetcode());
+    }
+
+    // ===============================================
+    // V20.6 - Aeron Binary Signal Publishing (AFTER successful trades)
+    // ===============================================
+    if(EnableAeronPublishing && (scalpSellOpened || trendSellOpened))
+    {
+        // Use AeronInstrumentName for both symbol and instrument, or fallback to _Symbol
+        string aeronName = (StringLen(AeronInstrumentName) > 0) ? AeronInstrumentName : ExtractSymbolPrefix(_Symbol);
+        string symbol = aeronName;
+        string instrument = aeronName;
+
+        double mainBuffer[], signalBuffer[];
+        ArraySetAsSeries(mainBuffer, true);
+        ArraySetAsSeries(signalBuffer, true);
+
+        float confidence = 80.0;
+        if(CopyBuffer(stochHandle, 0, 0, 3, mainBuffer) > 0 &&
+           CopyBuffer(stochHandle, 1, 0, 3, signalBuffer) > 0)
+        {
+            double K = mainBuffer[0];
+            double D = signalBuffer[0];
+            confidence = (float)MathMin(50.0 + MathAbs(K - D), 95.0);
+        }
+
+        // Publish ShortEntry1 (stop loss only)
+        bool pub1 = AeronPublishSignal(
+            symbol,
+            instrument,
+            AERON_SHORT_ENTRY1,
+            0,
+            SL,
+            0,
+            1,
+            confidence,
+            AeronSourceTag
+        );
+
+        if(pub1)
+        {
+            PrintFormat("[AERON_PUB] ✅ ShortEntry1: %s SL=%d qty=1 conf=%.1f", symbol, SL, confidence);
+        }
+
+        // Publish ShortEntry2 (stop loss + profit target)
+        int profitOffset = (int)(TP * 0.4);
+        bool pub2 = AeronPublishSignal(
+            symbol,
+            instrument,
+            AERON_SHORT_ENTRY2,
+            0,
+            SL,
+            SL + profitOffset,
+            1,
+            confidence,
+            AeronSourceTag
+        );
+
+        if(pub2)
+        {
+            PrintFormat("[AERON_PUB] ✅ ShortEntry2: %s SL=%d TP=%d qty=1 conf=%.1f",
+                        symbol, SL, SL + profitOffset, confidence);
+        }
     }
 }
 
