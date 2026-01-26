@@ -202,17 +202,17 @@ static void ensureDefaultMap()
     std::lock_guard<std::mutex> lock(g_mapMutex);
     if (!g_map.empty()) return;
 
-    //Forex - NAS100 - 1, SPX500 - 1, US30 - 0.5
+    // Forex - NAS100 - 1, SPX500 - 1, US30 - 0.5
     // Audacity - TECH100 - 0.2, SPX500 - 0.4, DJ30 - 0.05
     // US Oil - Forex
 
     // Defaults (adjust/override from MQL5 via AeronBridge_RegisterInstrumentMapW)
     // Example asked: ES -> SPX500
-    g_map["ES"] = InstMap{ "SPX500", 0.25, 0.1 };
+    g_map["ES"] = InstMap{ "SPX500", 0.25, 0.2 };
     // Common: NQ -> NAS100/TECH100
-    g_map["NQ"] = InstMap{ "NAS100", 0.25, 0.1 };
+    g_map["NQ"] = InstMap{ "TECH100", 0.25, 0.4 };
     // YM -> US30
-    g_map["YM"] = InstMap{ "DJ30", 0.25, 0.1 };
+    g_map["YM"] = InstMap{ "DJ30", 0.25, 0.05 };
 }
 
 // ===============================

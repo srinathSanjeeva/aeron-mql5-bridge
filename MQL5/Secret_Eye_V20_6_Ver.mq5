@@ -1051,7 +1051,7 @@ void OnTick()
     
     // === KILL SWITCH LOGIC ===
     // Check if kill switch should be executed (close positions at end time)
-    if(!killSwitchExecuted)
+    if(EnableKillSwitch && !killSwitchExecuted)
     {
         MqlDateTime time;
         TimeToStruct(TimeCurrent(), time);
@@ -2521,8 +2521,6 @@ bool AreAllReversePositionsClosed(bool checkingForBuy)
 void CloseAllBuyPositions()
 {
     Print("Reversal signal: Sending request to close all BUY positions.");
-    bool scalpCloseSuccess = true;
-    bool trendCloseSuccess = true;
     
     if(scalpBuyOpened && scalpBuyTicket != 0) 
     {
@@ -2536,15 +2534,15 @@ void CloseAllBuyPositions()
                 
                 if(trade.PositionClose(scalpBuyTicket))
                 {
-                    Print("Scalp Buy position close request sent successfully. Ticket: #", scalpBuyTicket, " Exit: ", exitReason, " (Reversal - no Kafka publish)");
+                    Print("Scalp Buy position close request sent. Ticket: #", scalpBuyTicket, " Exit: ", exitReason, " (Reversal - no Kafka publish)");
                     
                     // V20.4 - Do NOT publish exit signal on reversal (new short entry will be published)
+                    // V20.6 - Flags will be reset by UpdateAllPositionStatus() when position actually closes
                     
-                    if(ShowAlerts) Alert("Scalp BUY Position Closed (Reversal) for ", _Symbol, " - Ticket: #", scalpBuyTicket);
+                    if(ShowAlerts) Alert("Scalp BUY Close Requested (Reversal) for ", _Symbol, " - Ticket: #", scalpBuyTicket);
                 }
                 else
                 {
-                    scalpCloseSuccess = false;
                     Print("=== SCALP BUY CLOSE FAILURE ===");
                     Print("Failed to close Scalp Buy position #", scalpBuyTicket);
                     Print("Error Code: ", GetLastError());
@@ -2572,15 +2570,15 @@ void CloseAllBuyPositions()
                 
                 if(trade.PositionClose(trendBuyTicket))
                 {
-                    Print("Trend Buy position close request sent successfully. Ticket: #", trendBuyTicket, " Exit: ", exitReason, " (Reversal - no Kafka publish)");
+                    Print("Trend Buy position close request sent. Ticket: #", trendBuyTicket, " Exit: ", exitReason, " (Reversal - no Kafka publish)");
                     
                     // V20.4 - Do NOT publish exit signal on reversal (new short entry will be published)
+                    // V20.6 - Flags will be reset by UpdateAllPositionStatus() when position actually closes
                     
-                    if(ShowAlerts) Alert("Trend BUY Position Closed (Reversal) for ", _Symbol, " - Ticket: #", trendBuyTicket);
+                    if(ShowAlerts) Alert("Trend BUY Close Requested (Reversal) for ", _Symbol, " - Ticket: #", trendBuyTicket);
                 }
                 else
                 {
-                    trendCloseSuccess = false;
                     Print("=== TREND BUY CLOSE FAILURE ===");
                     Print("Failed to close Trend Buy position #", trendBuyTicket);
                     Print("Error Code: ", GetLastError());
@@ -2596,24 +2594,13 @@ void CloseAllBuyPositions()
         }
     }
     
-    if(scalpCloseSuccess)
-    {
-        scalpBuyOpened = false;
-        scalpBuyTicket = 0;
-    }
-    
-    if(trendCloseSuccess)
-    {
-        trendBuyOpened = false;
-        trendBuyTicket = 0;
-    }
+    // V20.6 - Don't reset flags here - let UpdateAllPositionStatus() handle it when positions actually close
+    Print("BUY position close requests sent. Waiting for confirmation...");
 }
 
 void CloseAllSellPositions()
 {
     Print("Reversal signal: Sending request to close all SELL positions.");
-    bool scalpCloseSuccess = true;
-    bool trendCloseSuccess = true;
     
     if(scalpSellOpened && scalpSellTicket != 0) 
     {
@@ -2627,15 +2614,15 @@ void CloseAllSellPositions()
                 
                 if(trade.PositionClose(scalpSellTicket))
                 {
-                    Print("Scalp Sell position close request sent successfully. Ticket: #", scalpSellTicket, " Exit: ", exitReason, " (Reversal - no Kafka publish)");
+                    Print("Scalp Sell position close request sent. Ticket: #", scalpSellTicket, " Exit: ", exitReason, " (Reversal - no Kafka publish)");
                     
                     // V20.4 - Do NOT publish exit signal on reversal (new long entry will be published)
+                    // V20.6 - Flags will be reset by UpdateAllPositionStatus() when position actually closes
                     
-                    if(ShowAlerts) Alert("Scalp SELL Position Closed (Reversal) for ", _Symbol, " - Ticket: #", scalpSellTicket);
+                    if(ShowAlerts) Alert("Scalp SELL Close Requested (Reversal) for ", _Symbol, " - Ticket: #", scalpSellTicket);
                 }
                 else
                 {
-                    scalpCloseSuccess = false;
                     Print("=== SCALP SELL CLOSE FAILURE ===");
                     Print("Failed to close Scalp Sell position #", scalpSellTicket);
                     Print("Error Code: ", GetLastError());
@@ -2663,15 +2650,15 @@ void CloseAllSellPositions()
                 
                 if(trade.PositionClose(trendSellTicket))
                 {
-                    Print("Trend Sell position close request sent successfully. Ticket: #", trendSellTicket, " Exit: ", exitReason, " (Reversal - no Kafka publish)");
+                    Print("Trend Sell position close request sent. Ticket: #", trendSellTicket, " Exit: ", exitReason, " (Reversal - no Kafka publish)");
                     
                     // V20.4 - Do NOT publish exit signal on reversal (new long entry will be published)
+                    // V20.6 - Flags will be reset by UpdateAllPositionStatus() when position actually closes
                     
-                    if(ShowAlerts) Alert("Trend SELL Position Closed (Reversal) for ", _Symbol, " - Ticket: #", trendSellTicket);
+                    if(ShowAlerts) Alert("Trend SELL Close Requested (Reversal) for ", _Symbol, " - Ticket: #", trendSellTicket);
                 }
                 else
                 {
-                    trendCloseSuccess = false;
                     Print("=== TREND SELL CLOSE FAILURE ===");
                     Print("Failed to close Trend Sell position #", trendSellTicket);
                     Print("Error Code: ", GetLastError());
@@ -2687,17 +2674,8 @@ void CloseAllSellPositions()
         }
     }
     
-    if(scalpCloseSuccess)
-    {
-        scalpSellOpened = false;
-        scalpSellTicket = 0;
-    }
-    
-    if(trendCloseSuccess)
-    {
-        trendSellOpened = false;
-        trendSellTicket = 0;
-    }
+    // V20.6 - Don't reset flags here - let UpdateAllPositionStatus() handle it when positions actually close
+    Print("SELL position close requests sent. Waiting for confirmation...");
 }
 
 void CheckDailyLossLimit()
