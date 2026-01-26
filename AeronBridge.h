@@ -58,6 +58,32 @@ extern "C" {
     // Copies last error string into outBuf (UTF-8 bytes). Returns bytes written.
     __declspec(dllexport) int AeronBridge_LastError(unsigned char* outBuf, int outBufLen);
 
+    // ===============================
+    // Publisher API (Aeron Producer)
+    // ===============================
+
+    // Start Aeron publisher
+    // aeronDir: Aeron directory (e.g. L"C:\\aeron\\standalone")
+    // channel : Aeron URI for publishing (e.g. L"aeron:ipc" or L"aeron:udp?endpoint=127.0.0.1:40123")
+    // streamId: stream id for publication (e.g. 2001)
+    // timeoutMs: max time to wait for publication to become available
+    // Returns 1 on success, 0 on failure.
+    __declspec(dllexport) int AeronBridge_StartPublisherW(
+        const wchar_t* aeronDir,
+        const wchar_t* channel,
+        int streamId,
+        int timeoutMs);
+
+    // Publish a binary signal message (104 bytes, same format as subscriber)
+    // buffer: 104-byte binary message in the protocol format
+    // Returns 1 on success, 0 on failure.
+    __declspec(dllexport) int AeronBridge_PublishBinary(
+        const unsigned char* buffer,
+        int bufferLen);
+
+    // Stop/cleanup publisher
+    __declspec(dllexport) void AeronBridge_StopPublisher();
+
 #ifdef __cplusplus
 }
 #endif

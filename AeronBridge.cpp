@@ -77,6 +77,13 @@ static double g_defaultTickSize = 0.01;
 static double g_defaultPointSize = 0.01;
 
 // ===============================
+// Publisher (Aeron Producer) Globals
+// ===============================
+static aeron_async_add_publication_t* g_asyncPub = nullptr;
+static aeron_publication_t* g_publication = nullptr;
+static std::atomic<int> g_pubStarted{ 0 };
+
+// ===============================
 // Helpers
 // ===============================
 static void setErrorLocked(const std::string& s)
@@ -195,11 +202,15 @@ static void ensureDefaultMap()
     std::lock_guard<std::mutex> lock(g_mapMutex);
     if (!g_map.empty()) return;
 
+    //Forex - NAS100 - 1, SPX500 - 1, US30 - 0.5
+    // Audacity - TECH100 - 0.2, SPX500 - 0.4, DJ30 - 0.05
+    // US Oil - Forex
+
     // Defaults (adjust/override from MQL5 via AeronBridge_RegisterInstrumentMapW)
     // Example asked: ES -> SPX500
     g_map["ES"] = InstMap{ "SPX500", 0.25, 0.1 };
     // Common: NQ -> NAS100/TECH100
-    g_map["NQ"] = InstMap{ "TECH100", 0.25, 0.1 };
+    g_map["NQ"] = InstMap{ "NAS100", 0.25, 0.1 };
     // YM -> US30
     g_map["YM"] = InstMap{ "DJ30", 0.25, 0.1 };
 }
@@ -523,4 +534,163 @@ int AeronBridge_SetUnmappedBehaviorW(
     g_defaultPointSize = defaultPointSize;
 
     return 1;
+}
+
+// ===============================
+// Publisher API Implementation
+// ===============================
+
+int AeronBridge_StartPublisherW(
+    const wchar_t* aeronDirW,
+    const wchar_t* channelW,
+    int streamId,
+    int timeoutMs)
+{
+    if (g_pubStarted.load()) return 1;
+
+    const std::string aeronDir = wide_to_utf8(aeronDirW);
+    const std::string channel = wide_to_utf8(channelW);
+
+    if (!channelLooksValid(channel))
+    {
+        setError("Invalid Aeron publisher channel: must start with 'aeron:'");
+        return 0;
+    }
+    if (streamId <= 0)
+    {
+        setError("Invalid publisher streamId: must be > 0");
+        return 0;
+    }
+    if (timeoutMs <= 0) timeoutMs = 3000;
+
+    // Initialize Aeron context if not already done (might be shared with subscriber)
+    if (!g_aeron)
+    {
+        if (aeron_context_init(&g_context) < 0)
+        {
+            setErrorFromAeron("aeron_context_init failed (publisher)");
+            return 0;
+        }
+
+        if (!aeronDir.empty())
+        {
+            aeron_context_set_dir(g_context, aeronDir.c_str());
+        }
+
+        if (aeron_init(&g_aeron, g_context) < 0)
+        {
+            setErrorFromAeron("aeron_init failed (publisher)");
+            return 0;
+        }
+
+        if (aeron_start(g_aeron) < 0)
+        {
+            setErrorFromAeron("aeron_start failed (publisher)");
+            return 0;
+        }
+    }
+
+    // Add publication async
+    if (aeron_async_add_publication(
+        &g_asyncPub,
+        g_aeron,
+        channel.c_str(),
+        streamId) < 0)
+    {
+        setErrorFromAeron("aeron_async_add_publication failed");
+        return 0;
+    }
+
+    // Wait for publication to be ready
+    const auto deadline = std::chrono::steady_clock::now() + 
+                         std::chrono::milliseconds(timeoutMs);
+    
+    int pollRes = 0;
+    while (true)
+    {
+        pollRes = aeron_async_add_publication_poll(&g_publication, g_asyncPub);
+        if (pollRes < 0)
+        {
+            setErrorFromAeron("aeron_async_add_publication_poll failed");
+            g_asyncPub = nullptr;
+            return 0;
+        }
+        if (pollRes > 0)
+        {
+            break;  // Ready
+        }
+
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            setError("Publication timeout: MediaDriver down or channel issue");
+            g_asyncPub = nullptr;
+            return 0;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    g_pubStarted.store(1);
+    return 1;
+}
+
+int AeronBridge_PublishBinary(const unsigned char* buffer, int bufferLen)
+{
+    if (!g_publication)
+    {
+        setError("Publication not initialized");
+        return 0;
+    }
+
+    if (!buffer || bufferLen != FRAME_SIZE)
+    {
+        setError("PublishBinary: buffer must be exactly 104 bytes");
+        return 0;
+    }
+
+    // Attempt to offer the message
+    int64_t result = aeron_publication_offer(
+        g_publication,
+        (const uint8_t*)buffer,
+        (size_t)bufferLen,
+        nullptr,
+        nullptr);
+
+    if (result < 0)
+    {
+        if (result == AERON_PUBLICATION_NOT_CONNECTED)
+        {
+            setError("Publication not connected");
+        }
+        else if (result == AERON_PUBLICATION_BACK_PRESSURED)
+        {
+            setError("Publication back pressured");
+        }
+        else if (result == AERON_PUBLICATION_ADMIN_ACTION)
+        {
+            setError("Publication admin action");
+        }
+        else if (result == AERON_PUBLICATION_CLOSED)
+        {
+            setError("Publication closed");
+        }
+        else
+        {
+            setErrorFromAeron("aeron_publication_offer failed");
+        }
+        return 0;
+    }
+
+    return 1;  // Success
+}
+
+void AeronBridge_StopPublisher()
+{
+    if (g_publication)
+    {
+        aeron_publication_close(g_publication, nullptr, nullptr);
+        g_publication = nullptr;
+    }
+    g_asyncPub = nullptr;
+    g_pubStarted.store(0);
 }
