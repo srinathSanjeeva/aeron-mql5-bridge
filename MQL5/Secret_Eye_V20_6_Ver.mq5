@@ -1223,6 +1223,12 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                         const MqlTradeRequest& request,
                         const MqlTradeResult& result)
 {
+    // V20.6 - Don't publish signals when EA is disabled
+    if(!on)
+    {
+        return;
+    }
+    
     // Only process actual fills
     if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
     {
