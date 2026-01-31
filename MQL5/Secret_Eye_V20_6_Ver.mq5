@@ -47,6 +47,14 @@ enum ENUM_MESSAGE_FORMAT
     MSG_BOTH         // Both Formats (default)
 };
 
+//--- Account Mode Enum
+enum ENUM_ACCOUNT_MODE
+{
+    MODE_UNKNOWN = -1,
+    MODE_NETTING = 0,   // One position per symbol
+    MODE_HEDGING = 1    // Multiple positions per symbol
+};
+
 //--- JSON parsing structures (simplified for MQL5)
 struct TradingWindow
 {
@@ -105,6 +113,8 @@ input int               ManualEndMinute = 0;            // Fallback end time (mi
 input group             "Advanced Position Management"
 input bool              WaitForClosureConfirmation = true; // Wait for reverse positions to close before opening new ones
 input bool              UseFillOrKill = false;          // Use Fill-Or-Kill (FOK) order execution
+input int               MaxClosureRetries = 5;          // Maximum retries for position closure
+input int               ClosureRetryDelay = 200;        // Delay between closure retries (milliseconds)
 
 input group             "JSON Publishing"
 input bool              PublishToKafka = true;          // Enable JSON publishing
@@ -131,6 +141,10 @@ bool                stopTradingForDay = false;
 static int          detectedServerOffset = 0;
 static bool         killSwitchExecuted = false;
 static bool         firstTradeOfDayPlaced = false;
+
+// V20.5 - Account Mode Detection
+static ENUM_ACCOUNT_MODE accountMode = MODE_UNKNOWN;
+static bool         hedgingModeDetected = false;
 
 // V20.2 - Immediate Entry Variables
 static bool         immediateEntryPending = false;
@@ -173,8 +187,9 @@ static char    httpResponseBuffer[2048];
 
 //--- Forward Declarations
 void UpdateAllPositionStatus();
-void CloseAllBuyPositions();
-void CloseAllSellPositions();
+bool CloseAllBuyPositions();
+bool CloseAllSellPositions();
+bool ClosePositionWithRetry(ulong ticket, string positionName, int maxRetries = 5);
 bool IsTradingAllowed();
 bool IsInitialDelayOver();
 void CheckDailyLossLimit();
@@ -196,6 +211,67 @@ void SetTradingHoursForToday();
 void CheckAndUpdateDailyTradingHours();
 string GetDayOfWeekString(int dayOfWeek);
 bool ParseTimeString(string timeStr, int &hour, int &minute);
+ENUM_ACCOUNT_MODE DetectAccountMarginMode();
+int CountPositionsByTypeAndSymbol(ENUM_POSITION_TYPE posType);
+
+//+------------------------------------------------------------------+
+//| V20.5 - Account Margin Mode Detection                           |
+//+------------------------------------------------------------------+
+
+/**
+ * @brief Detects account margin calculation mode (netting vs hedging)
+ * @return ENUM_ACCOUNT_MODE Account margin mode
+ */
+ENUM_ACCOUNT_MODE DetectAccountMarginMode()
+{
+    ENUM_ACCOUNT_MARGIN_MODE mode = (ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
+    
+    switch(mode)
+    {
+        case ACCOUNT_MARGIN_MODE_RETAIL_NETTING:
+            Print("✅ Account Mode: NETTING (One position per symbol)");
+            return MODE_NETTING;
+            
+        case ACCOUNT_MARGIN_MODE_RETAIL_HEDGING:
+            Print("✅ Account Mode: HEDGING (Multiple positions per symbol allowed)");
+            return MODE_HEDGING;
+            
+        case ACCOUNT_MARGIN_MODE_EXCHANGE:
+            Print("✅ Account Mode: EXCHANGE (Hedging typically allowed)");
+            return MODE_HEDGING;
+            
+        default:
+            Print("⚠️ WARNING: Unknown account margin mode: ", mode, " - Assuming HEDGING for safety");
+            return MODE_HEDGING;
+    }
+}
+
+/**
+ * @brief Counts positions by type (buy/sell) for the current symbol
+ * @param posType Position type (POSITION_TYPE_BUY or POSITION_TYPE_SELL)
+ * @return Number of positions matching the criteria
+ */
+int CountPositionsByTypeAndSymbol(ENUM_POSITION_TYPE posType)
+{
+    int count = 0;
+    int totalPositions = PositionsTotal();
+    
+    for(int i = 0; i < totalPositions; i++)
+    {
+        if(PositionGetSymbol(i) == _Symbol)
+        {
+            ulong posMagic = PositionGetInteger(POSITION_MAGIC);
+            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            
+            if(posMagic == magic && type == posType)
+            {
+                count++;
+            }
+        }
+    }
+    
+    return count;
+}
 
 // V20.4 - JSON Publishing Forward Declarations
 string GetInstrumentSymbol(string fullName);
@@ -789,10 +865,21 @@ void PublishExitSignal(string direction, string exitReason)
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("Initializing Stochastic Algo V20.4 for symbol: ", _Symbol);
+    Print("Initializing Stochastic Algo V20.6 for symbol: ", _Symbol);
     magic = digital_name_ * 1000000 + code_interaction_ * 1000 + StringToInteger(_Symbol);
     trade.SetExpertMagicNumber(magic);
     trade.SetMarginMode();
+
+    // V20.5 - Detect account margin mode (hedging vs netting)
+    accountMode = DetectAccountMarginMode();
+    hedgingModeDetected = (accountMode == MODE_HEDGING);
+    if(hedgingModeDetected)
+    {
+        Print("=== HEDGING MODE ACTIVE ===");
+        Print("Enhanced position closure with retry logic will be used");
+        Print("MaxClosureRetries: ", MaxClosureRetries);
+        Print("ClosureRetryDelay: ", ClosureRetryDelay, "ms");
+    }
 
     // --- V20.3: Set Order Filling Policy ---
     if (UseFillOrKill)
@@ -1152,7 +1239,13 @@ void OnTick()
 
     if(buySignal)
     {
-        CloseAllSellPositions();
+        bool closureSuccess = CloseAllSellPositions();
+        if(!closureSuccess && accountMode == MODE_HEDGING)
+        {
+            Print("⚠️ HEDGING MODE WARNING: Failed to close all SELL positions. Skipping BUY entry for safety.");
+            return;
+        }
+        
         Sleep(100);
         UpdateAllPositionStatus();
         if(IsTradingAllowed() && !stopTradingForProfitProtection && !scalpBuyOpened && !trendBuyOpened)
@@ -1182,7 +1275,13 @@ void OnTick()
 
     if(sellSignal)
     {
-        CloseAllBuyPositions();
+        bool closureSuccess = CloseAllBuyPositions();
+        if(!closureSuccess && accountMode == MODE_HEDGING)
+        {
+            Print("⚠️ HEDGING MODE WARNING: Failed to close all BUY positions. Skipping SELL entry for safety.");
+            return;
+        }
+        
         Sleep(100);
         UpdateAllPositionStatus();
         
@@ -2518,164 +2617,269 @@ bool AreAllReversePositionsClosed(bool checkingForBuy)
     }
 }
 
-void CloseAllBuyPositions()
+//+------------------------------------------------------------------+
+//| V20.5 - Enhanced Position Closure with Retry Logic              |
+//+------------------------------------------------------------------+
+
+/**
+ * @brief Closes a position with retry logic and exponential backoff
+ * @param ticket Position ticket to close
+ * @param positionName Human-readable position name for logging
+ * @param maxRetries Maximum number of closure attempts
+ * @return true if position closed successfully, false otherwise
+ */
+bool ClosePositionWithRetry(ulong ticket, string positionName, int maxRetries = 5)
 {
-    Print("Reversal signal: Sending request to close all BUY positions.");
-    
-    if(scalpBuyOpened && scalpBuyTicket != 0) 
+    if(ticket == 0)
     {
-        if(PositionExistsByTicket(scalpBuyTicket))
+        Print("Cannot close ", positionName, " - invalid ticket (0)");
+        return true;  // Consider this success to avoid blocking
+    }
+    
+    // Check if position still exists
+    if(!PositionExistsByTicket(ticket))
+    {
+        Print(positionName, " position #", ticket, " already closed or doesn't exist");
+        return true;
+    }
+    
+    int attempt = 0;
+    int delay = ClosureRetryDelay;
+    
+    while(attempt < maxRetries)
+    {
+        attempt++;
+        Print("Attempting to close ", positionName, " #", ticket, " (Attempt ", attempt, "/", maxRetries, ")");
+        
+        // Attempt to close position
+        if(trade.PositionClose(ticket))
         {
-            // Get position P&L before closing (for logging only, not publishing on reversal)
-            if(PositionSelectByTicket(scalpBuyTicket))
+            Print("✅ SUCCESS: ", positionName, " #", ticket, " closed on attempt ", attempt);
+            
+            // Verify closure
+            Sleep(50);  // Brief pause to allow server confirmation
+            if(!PositionExistsByTicket(ticket))
             {
-                double positionProfit = PositionGetDouble(POSITION_PROFIT);
-                string exitReason = (positionProfit >= 0) ? "Profit target" : "Stop loss";
-                
-                if(trade.PositionClose(scalpBuyTicket))
-                {
-                    Print("Scalp Buy position close request sent. Ticket: #", scalpBuyTicket, " Exit: ", exitReason, " (Reversal - no Kafka publish)");
-                    
-                    // V20.4 - Do NOT publish exit signal on reversal (new short entry will be published)
-                    // V20.6 - Flags will be reset by UpdateAllPositionStatus() when position actually closes
-                    
-                    if(ShowAlerts) Alert("Scalp BUY Close Requested (Reversal) for ", _Symbol, " - Ticket: #", scalpBuyTicket);
-                }
-                else
-                {
-                    Print("=== SCALP BUY CLOSE FAILURE ===");
-                    Print("Failed to close Scalp Buy position #", scalpBuyTicket);
-                    Print("Error Code: ", GetLastError());
-                    Print("RetCode: ", trade.ResultRetcode());
-                }
+                Print("✅ CONFIRMED: ", positionName, " #", ticket, " closure verified");
+                return true;
+            }
+            else
+            {
+                Print("⚠️ WARNING: Close request accepted but position still exists. Retrying...");
             }
         }
         else
         {
-            Print("Scalp Buy position #", scalpBuyTicket, " no longer exists. Resetting tracking.");
+            int errorCode = GetLastError();
+            uint retCode = trade.ResultRetcode();
+            
+            Print("❌ FAILED: ", positionName, " #", ticket, " close attempt ", attempt, " failed");
+            Print("   Error Code: ", errorCode, " | RetCode: ", retCode);
+            Print("   Description: ", trade.ResultRetcodeDescription());
+        }
+        
+        // Exponential backoff delay
+        if(attempt < maxRetries)
+        {
+            Print("   Waiting ", delay, "ms before retry...");
+            Sleep(delay);
+            delay = (int)(delay * 1.5);  // Exponential backoff
+        }
+    }
+    
+    // Final verification
+    if(!PositionExistsByTicket(ticket))
+    {
+        Print("✅ Position ", positionName, " #", ticket, " no longer exists (closed externally?)");
+        return true;
+    }
+    
+    Print("❌ EXHAUSTED: Failed to close ", positionName, " #", ticket, " after ", maxRetries, " attempts");
+    return false;
+}
+
+/**
+ * @brief Closes all buy positions with enhanced hedging mode support
+ * @return true if all positions closed successfully, false otherwise
+ */
+bool CloseAllBuyPositions()
+{
+    Print("=== CLOSING ALL BUY POSITIONS ===");
+    Print("Account Mode: ", (accountMode == MODE_HEDGING ? "HEDGING" : "NETTING"));
+    Print("Symbol: ", _Symbol, " | Magic: ", magic);
+    
+    bool allClosed = true;
+    
+    // Close scalp buy position
+    if(scalpBuyOpened && scalpBuyTicket != 0)
+    {
+        if(!ClosePositionWithRetry(scalpBuyTicket, "Scalp Buy", MaxClosureRetries))
+        {
+            allClosed = false;
+            Print("⚠️ WARNING: Scalp Buy #", scalpBuyTicket, " closure incomplete");
+        }
+        else
+        {
             scalpBuyOpened = false;
             scalpBuyTicket = 0;
         }
     }
     
-    if(trendBuyOpened && trendBuyTicket != 0) 
+    // Close trend buy position
+    if(trendBuyOpened && trendBuyTicket != 0)
     {
-        if(PositionExistsByTicket(trendBuyTicket))
+        if(!ClosePositionWithRetry(trendBuyTicket, "Trend Buy", MaxClosureRetries))
         {
-            // Get position P&L before closing (for logging only, not publishing on reversal)
-            if(PositionSelectByTicket(trendBuyTicket))
-            {
-                double positionProfit = PositionGetDouble(POSITION_PROFIT);
-                string exitReason = (positionProfit >= 0) ? "Profit target" : "Stop loss";
-                
-                if(trade.PositionClose(trendBuyTicket))
-                {
-                    Print("Trend Buy position close request sent. Ticket: #", trendBuyTicket, " Exit: ", exitReason, " (Reversal - no Kafka publish)");
-                    
-                    // V20.4 - Do NOT publish exit signal on reversal (new short entry will be published)
-                    // V20.6 - Flags will be reset by UpdateAllPositionStatus() when position actually closes
-                    
-                    if(ShowAlerts) Alert("Trend BUY Close Requested (Reversal) for ", _Symbol, " - Ticket: #", trendBuyTicket);
-                }
-                else
-                {
-                    Print("=== TREND BUY CLOSE FAILURE ===");
-                    Print("Failed to close Trend Buy position #", trendBuyTicket);
-                    Print("Error Code: ", GetLastError());
-                    Print("RetCode: ", trade.ResultRetcode());
-                }
-            }
+            allClosed = false;
+            Print("⚠️ WARNING: Trend Buy #", trendBuyTicket, " closure incomplete");
         }
         else
         {
-            Print("Trend Buy position #", trendBuyTicket, " no longer exists. Resetting tracking.");
             trendBuyOpened = false;
             trendBuyTicket = 0;
         }
     }
     
-    // V20.6 - Don't reset flags here - let UpdateAllPositionStatus() handle it when positions actually close
-    Print("BUY position close requests sent. Waiting for confirmation...");
-}
-
-void CloseAllSellPositions()
-{
-    Print("Reversal signal: Sending request to close all SELL positions.");
-    
-    if(scalpSellOpened && scalpSellTicket != 0) 
+    // V20.5: In hedging mode, scan for any remaining buy positions with our magic number
+    if(accountMode == MODE_HEDGING)
     {
-        if(PositionExistsByTicket(scalpSellTicket))
+        int buyCount = CountPositionsByTypeAndSymbol(POSITION_TYPE_BUY);
+        
+        if(buyCount > 0)
         {
-            // Get position P&L before closing (for logging only, not publishing on reversal)
-            if(PositionSelectByTicket(scalpSellTicket))
+            Print("⚠️ HEDGING MODE: Found ", buyCount, " additional buy position(s) for ", _Symbol);
+            
+            // Close any remaining buy positions
+            for(int i = PositionsTotal() - 1; i >= 0; i--)
             {
-                double positionProfit = PositionGetDouble(POSITION_PROFIT);
-                string exitReason = (positionProfit >= 0) ? "Profit target" : "Stop loss";
-                
-                if(trade.PositionClose(scalpSellTicket))
+                if(PositionGetSymbol(i) == _Symbol)
                 {
-                    Print("Scalp Sell position close request sent. Ticket: #", scalpSellTicket, " Exit: ", exitReason, " (Reversal - no Kafka publish)");
+                    ulong posMagic = PositionGetInteger(POSITION_MAGIC);
+                    ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+                    ulong posTicket = PositionGetInteger(POSITION_TICKET);
                     
-                    // V20.4 - Do NOT publish exit signal on reversal (new long entry will be published)
-                    // V20.6 - Flags will be reset by UpdateAllPositionStatus() when position actually closes
-                    
-                    if(ShowAlerts) Alert("Scalp SELL Close Requested (Reversal) for ", _Symbol, " - Ticket: #", scalpSellTicket);
-                }
-                else
-                {
-                    Print("=== SCALP SELL CLOSE FAILURE ===");
-                    Print("Failed to close Scalp Sell position #", scalpSellTicket);
-                    Print("Error Code: ", GetLastError());
-                    Print("RetCode: ", trade.ResultRetcode());
+                    if(posMagic == magic && posType == POSITION_TYPE_BUY)
+                    {
+                        Print("Found orphaned buy position #", posTicket, " - attempting closure");
+                        if(!ClosePositionWithRetry(posTicket, "Orphaned Buy", MaxClosureRetries))
+                        {
+                            allClosed = false;
+                        }
+                    }
                 }
             }
         }
+    }
+    
+    // Final verification
+    int finalBuyCount = CountPositionsByTypeAndSymbol(POSITION_TYPE_BUY);
+    
+    if(finalBuyCount == 0)
+    {
+        Print("✅ SUCCESS: All buy positions closed for ", _Symbol);
+        scalpBuyOpened = false;
+        scalpBuyTicket = 0;
+        trendBuyOpened = false;
+        trendBuyTicket = 0;
+        return true;
+    }
+    else
+    {
+        Print("⚠️ WARNING: ", finalBuyCount, " buy position(s) still open for ", _Symbol);
+        return false;
+    }
+}
+
+/**
+ * @brief Closes all sell positions with enhanced hedging mode support
+ * @return true if all positions closed successfully, false otherwise
+ */
+bool CloseAllSellPositions()
+{
+    Print("=== CLOSING ALL SELL POSITIONS ===");
+    Print("Account Mode: ", (accountMode == MODE_HEDGING ? "HEDGING" : "NETTING"));
+    Print("Symbol: ", _Symbol, " | Magic: ", magic);
+    
+    bool allClosed = true;
+    
+    // Close scalp sell position
+    if(scalpSellOpened && scalpSellTicket != 0)
+    {
+        if(!ClosePositionWithRetry(scalpSellTicket, "Scalp Sell", MaxClosureRetries))
+        {
+            allClosed = false;
+            Print("⚠️ WARNING: Scalp Sell #", scalpSellTicket, " closure incomplete");
+        }
         else
         {
-            Print("Scalp Sell position #", scalpSellTicket, " no longer exists. Resetting tracking.");
             scalpSellOpened = false;
             scalpSellTicket = 0;
         }
     }
     
-    if(trendSellOpened && trendSellTicket != 0) 
+    // Close trend sell position
+    if(trendSellOpened && trendSellTicket != 0)
     {
-        if(PositionExistsByTicket(trendSellTicket))
+        if(!ClosePositionWithRetry(trendSellTicket, "Trend Sell", MaxClosureRetries))
         {
-            // Get position P&L before closing (for logging only, not publishing on reversal)
-            if(PositionSelectByTicket(trendSellTicket))
-            {
-                double positionProfit = PositionGetDouble(POSITION_PROFIT);
-                string exitReason = (positionProfit >= 0) ? "Profit target" : "Stop loss";
-                
-                if(trade.PositionClose(trendSellTicket))
-                {
-                    Print("Trend Sell position close request sent. Ticket: #", trendSellTicket, " Exit: ", exitReason, " (Reversal - no Kafka publish)");
-                    
-                    // V20.4 - Do NOT publish exit signal on reversal (new long entry will be published)
-                    // V20.6 - Flags will be reset by UpdateAllPositionStatus() when position actually closes
-                    
-                    if(ShowAlerts) Alert("Trend SELL Close Requested (Reversal) for ", _Symbol, " - Ticket: #", trendSellTicket);
-                }
-                else
-                {
-                    Print("=== TREND SELL CLOSE FAILURE ===");
-                    Print("Failed to close Trend Sell position #", trendSellTicket);
-                    Print("Error Code: ", GetLastError());
-                    Print("RetCode: ", trade.ResultRetcode());
-                }
-            }
+            allClosed = false;
+            Print("⚠️ WARNING: Trend Sell #", trendSellTicket, " closure incomplete");
         }
         else
         {
-            Print("Trend Sell position #", trendSellTicket, " no longer exists. Resetting tracking.");
             trendSellOpened = false;
             trendSellTicket = 0;
         }
     }
     
-    // V20.6 - Don't reset flags here - let UpdateAllPositionStatus() handle it when positions actually close
-    Print("SELL position close requests sent. Waiting for confirmation...");
+    // V20.5: In hedging mode, scan for any remaining sell positions with our magic number
+    if(accountMode == MODE_HEDGING)
+    {
+        int sellCount = CountPositionsByTypeAndSymbol(POSITION_TYPE_SELL);
+        
+        if(sellCount > 0)
+        {
+            Print("⚠️ HEDGING MODE: Found ", sellCount, " additional sell position(s) for ", _Symbol);
+            
+            // Close any remaining sell positions
+            for(int i = PositionsTotal() - 1; i >= 0; i--)
+            {
+                if(PositionGetSymbol(i) == _Symbol)
+                {
+                    ulong posMagic = PositionGetInteger(POSITION_MAGIC);
+                    ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+                    ulong posTicket = PositionGetInteger(POSITION_TICKET);
+                    
+                    if(posMagic == magic && posType == POSITION_TYPE_SELL)
+                    {
+                        Print("Found orphaned sell position #", posTicket, " - attempting closure");
+                        if(!ClosePositionWithRetry(posTicket, "Orphaned Sell", MaxClosureRetries))
+                        {
+                            allClosed = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Final verification
+    int finalSellCount = CountPositionsByTypeAndSymbol(POSITION_TYPE_SELL);
+    
+    if(finalSellCount == 0)
+    {
+        Print("✅ SUCCESS: All sell positions closed for ", _Symbol);
+        scalpSellOpened = false;
+        scalpSellTicket = 0;
+        trendSellOpened = false;
+        trendSellTicket = 0;
+        return true;
+    }
+    else
+    {
+        Print("⚠️ WARNING: ", finalSellCount, " sell position(s) still open for ", _Symbol);
+        return false;
+    }
 }
 
 void CheckDailyLossLimit()
