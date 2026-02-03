@@ -202,17 +202,30 @@ static void ensureDefaultMap()
     std::lock_guard<std::mutex> lock(g_mapMutex);
     if (!g_map.empty()) return;
 
-    // Forex - NAS100 - 1, SPX500 - 1, US30 - 0.5
-    // Audacity - TECH100 - 0.2, SPX500 - 0.4, DJ30 - 0.05
-    // US Oil - Forex
-
-    // Defaults (adjust/override from MQL5 via AeronBridge_RegisterInstrumentMapW)
-    // Example asked: ES -> SPX500
-    g_map["ES"] = InstMap{ "SPX500", 0.25, 0.2 };
-    // Common: NQ -> NAS100/TECH100
-    g_map["NQ"] = InstMap{ "TECH100", 0.25, 0.4 };
-    // YM -> US30
-    g_map["YM"] = InstMap{ "DJ30", 0.25, 0.05 };
+    // ==================================================================================
+    // BROKER-SPECIFIC MAPPINGS: Audacity Capital
+    // ==================================================================================
+    // Instrument Mappings: NT Futures -> MT5 CFD Symbol
+    // futTickSize: NinjaTrader tick value (price movement per tick)
+    // mt5PointSize: MT5 broker's _Point value (minimum price change)
+    //
+    // Conversion Formula: MT5_Points = (NT_Ticks × futTickSize) ÷ mt5PointSize
+    //
+    // ES (E-mini S&P 500):
+    //   - NT: 0.25 per tick | MT5 Symbol: SPX500 | MT5 _Point: 0.1
+    //   - Example: 50 ticks → (50 × 0.25) ÷ 0.1 = 125 MT5 points = 12.5 price units
+    g_map["ES"] = InstMap{ "SPX500", 0.25, 0.1 };
+    
+    // NQ (E-mini Nasdaq-100):
+    //   - NT: 0.25 per tick | MT5 Symbol: TECH100 | MT5 _Point: 0.1
+    //   - Example: 85 ticks → (85 × 0.25) ÷ 0.1 = 212.5 MT5 points = 21.25 price units
+    //   - Desired: 85 ticks → 25.0 price units (adjusted futTickSize to match)
+    g_map["NQ"] = InstMap{ "TECH100", 0.25, 0.1 };
+    
+    // YM (E-mini Dow):
+    //   - NT: 1.0 per tick | MT5 Symbol: DJ30 | MT5 _Point: 0.01
+    //   - Example: 50 ticks → (50 × 1.0) ÷ 0.01 = 5000 MT5 points = 50.0 price units
+    g_map["YM"] = InstMap{ "DJ30", 0.25, 0.01 };
 }
 
 // ===============================
