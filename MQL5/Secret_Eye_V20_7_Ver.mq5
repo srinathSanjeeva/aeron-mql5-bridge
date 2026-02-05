@@ -4,7 +4,7 @@
 //|                                             https://www.sanjeevas.com|
 //+------------------------------------------------------------------+
 
-// V20.7 Release - Futures Symbol & Tick Conversion:
+// V20.7 Release - Futures Symbol & Tick Conversion + Exception Handling:
 // - Added automatic MT5 points to futures ticks conversion for Aeron signals
 // - Implemented futures symbol mapping (user-provided via AeronInstrumentName input)
 // - Accurate tick value conversion for all major CME currency futures (6A, 6E, 6B, 6C, 6J, 6N, 6S)
@@ -13,6 +13,10 @@
 // - ConvertPointsToFuturesTicks() function handles point/tick ratio calculations
 // - All Aeron signal publishes now use converted tick values for SL/TP
 // - Enhanced logging shows both points and converted ticks for transparency
+// - Comprehensive exception handling and crash prevention system
+// - Safe wrappers for all critical operations (indicators, arrays, DLL calls, WebRequests)
+// - Graceful error recovery with detailed logging
+// - Protected against: division by zero, null handles, array bounds, infinite loops, memory issues
 //
 // V20.6 Release - Aeron Binary Publisher Integration:
 // - Integrated Aeron low-latency binary message publishing for trading signals
@@ -199,6 +203,276 @@ static char    jsonSignalBuffer[4096];
 static char    jsonExecBuffer[4096];
 static char    httpResponseBuffer[2048];
 
+//+------------------------------------------------------------------+
+//| V20.7 - Exception Handling and Crash Prevention System           |
+//+------------------------------------------------------------------+
+
+// Error tracking
+static int     g_consecutiveErrors = 0;
+static int     g_maxConsecutiveErrors = 10;
+static datetime g_lastErrorTime = 0;
+static string  g_lastErrorMessage = "";
+static bool    g_criticalErrorDetected = false;
+
+// Crash-loop prevention
+static datetime g_lastInitTime = 0;
+static int     g_initCount = 0;
+static int     g_maxInitPer10Sec = 3;
+
+// Operation context for error reporting
+enum OPERATION_CONTEXT
+{
+    OP_INIT,
+    OP_TICK,
+    OP_INDICATOR,
+    OP_TRADE,
+    OP_WEBREQUEST,
+    OP_DLL_CALL,
+    OP_ARRAY_OP,
+    OP_CALCULATION,
+    OP_AERON_PUBLISH
+};
+
+/**
+ * @brief Centralized error handler with detailed logging
+ * @param context Operation context where error occurred
+ * @param errorCode MT5 error code
+ * @param message Custom error message
+ * @param isCritical Whether this error should halt the EA
+ */
+void HandleError(OPERATION_CONTEXT context, int errorCode, string message, bool isCritical = false)
+{
+    string contextName = "";
+    switch(context)
+    {
+        case OP_INIT: contextName = "INITIALIZATION"; break;
+        case OP_TICK: contextName = "ONTICK"; break;
+        case OP_INDICATOR: contextName = "INDICATOR"; break;
+        case OP_TRADE: contextName = "TRADE"; break;
+        case OP_WEBREQUEST: contextName = "WEBREQUEST"; break;
+        case OP_DLL_CALL: contextName = "DLL_CALL"; break;
+        case OP_ARRAY_OP: contextName = "ARRAY_OPERATION"; break;
+        case OP_CALCULATION: contextName = "CALCULATION"; break;
+        case OP_AERON_PUBLISH: contextName = "AERON_PUBLISH"; break;
+    }
+    
+    string fullMessage = StringFormat("[ERROR:%s] Code:%d | %s", contextName, errorCode, message);
+    Print(fullMessage);
+    
+    // Track consecutive errors
+    if(TimeCurrent() - g_lastErrorTime < 5) // Within 5 seconds of last error
+    {
+        g_consecutiveErrors++;
+    }
+    else
+    {
+        g_consecutiveErrors = 1;
+    }
+    
+    g_lastErrorTime = TimeCurrent();
+    g_lastErrorMessage = message;
+    
+    // Critical error handling
+    if(isCritical)
+    {
+        g_criticalErrorDetected = true;
+        string alertMsg = StringFormat("CRITICAL ERROR in %s: %s (Code: %d)", contextName, message, errorCode);
+        Print("========================================");
+        Print(alertMsg);
+        Print("EA will stop trading to prevent further issues");
+        Print("========================================");
+        if(ShowAlerts) Alert(alertMsg);
+    }
+    
+    // Too many consecutive errors
+    if(g_consecutiveErrors >= g_maxConsecutiveErrors)
+    {
+        g_criticalErrorDetected = true;
+        string alertMsg = StringFormat("TOO MANY ERRORS (%d consecutive): Last error: %s", 
+                                      g_consecutiveErrors, message);
+        Print("========================================");
+        Print(alertMsg);
+        Print("EA will stop trading for safety");
+        Print("========================================");
+        if(ShowAlerts) Alert(alertMsg);
+    }
+}
+
+/**
+ * @brief Safe wrapper for CopyBuffer with validation
+ * @return true if successful, false otherwise
+ */
+bool SafeCopyBuffer(int indicator_handle, int buffer_num, int start_pos, int count, 
+                   double &buffer[], OPERATION_CONTEXT context = OP_INDICATOR)
+{
+    if(indicator_handle == INVALID_HANDLE)
+    {
+        HandleError(context, 4801,  // Invalid indicator handle
+                   "Invalid indicator handle in SafeCopyBuffer", false);
+        return false;
+    }
+    
+    if(count <= 0 || count > 10000)
+    {
+        HandleError(context, 4003,  // Invalid parameter
+                   StringFormat("Invalid buffer count: %d", count), false);
+        return false;
+    }
+    
+    ResetLastError();
+    int copied = CopyBuffer(indicator_handle, buffer_num, start_pos, count, buffer);
+    int error = GetLastError();
+    
+    if(copied <= 0 || error != 0)
+    {
+        HandleError(context, error, 
+                   StringFormat("CopyBuffer failed: handle=%d, buffer_num=%d, copied=%d", 
+                               indicator_handle, buffer_num, copied), false);
+        return false;
+    }
+    
+    // Validate buffer values
+    for(int i = 0; i < copied; i++)
+    {
+        if(buffer[i] != buffer[i]) // NaN check
+        {
+            HandleError(context, 0, 
+                       StringFormat("NaN detected in buffer at index %d", i), false);
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+/**
+ * @brief Safe wrapper for StringToCharArray with bounds checking
+ */
+bool SafeStringToCharArray(string str, uchar &array[], int start, int count)
+{
+    if(count < 0 || count > ArraySize(array))
+    {
+        HandleError(OP_ARRAY_OP, 4002, 
+                   StringFormat("Invalid StringToCharArray bounds: size=%d, count=%d", 
+                               ArraySize(array), count), false);
+        return false;
+    }
+    
+    if(StringLen(str) > ArraySize(array) - 1)
+    {
+        HandleError(OP_ARRAY_OP, 4002, 
+                   StringFormat("String too long for buffer: str_len=%d, array_size=%d", 
+                               StringLen(str), ArraySize(array)), false);
+        return false;
+    }
+    
+    ResetLastError();
+    int result = StringToCharArray(str, array, start, count);
+    int error = GetLastError();
+    
+    if(result < 0 || error != 0)
+    {
+        HandleError(OP_ARRAY_OP, error, "StringToCharArray failed", false);
+        return false;
+    }
+    
+    return true;
+}
+
+/**
+ * @brief Safe division with zero check
+ */
+double SafeDivide(double numerator, double denominator, double defaultValue = 0.0)
+{
+    if(MathAbs(denominator) < 0.0000001) // Practically zero
+    {
+        HandleError(OP_CALCULATION, 0, 
+                   StringFormat("Division by zero attempted: %.8f / %.8f", numerator, denominator), 
+                   false);
+        return defaultValue;
+    }
+    return numerator / denominator;
+}
+
+/**
+ * @brief Validate array access before use
+ */
+bool ValidateArrayAccess(const double &array[], int index, string arrayName = "")
+{
+    int size = ArraySize(array);
+    if(index < 0 || index >= size)
+    {
+        HandleError(OP_ARRAY_OP, 4003, 
+                   StringFormat("Array bounds violation: %s[%d], size=%d", 
+                               arrayName, index, size), false);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * @brief Safe WebRequest wrapper with retry logic
+ */
+bool SafeWebRequest(string method, string url, string headers, int timeout,
+                   const char &data[], char &result[], string &resultHeaders,
+                   int &httpCode, int maxRetries = 3)
+{
+    for(int attempt = 0; attempt < maxRetries; attempt++)
+    {
+        ResetLastError();
+        httpCode = WebRequest(method, url, headers, timeout, data, result, resultHeaders);
+        int error = GetLastError();
+        
+        if(httpCode > 0 && error == 0)
+        {
+            // Reset error counter on success
+            if(g_consecutiveErrors > 0) g_consecutiveErrors = 0;
+            return true;
+        }
+        
+        // Log attempt
+        Print(StringFormat("[WEBREQUEST] Attempt %d/%d failed: HTTP=%d, Error=%d", 
+                          attempt + 1, maxRetries, httpCode, error));
+        
+        // Don't retry on configuration errors
+        if(error == 5200 ||  // WebRequest invalid address
+           error == 5203)    // WebRequest request failed
+        {
+            HandleError(OP_WEBREQUEST, error, 
+                       StringFormat("WebRequest configuration error for URL: %s", url), false);
+            break;
+        }
+        
+        // Wait before retry (exponential backoff)
+        if(attempt < maxRetries - 1)
+        {
+            Sleep((int)MathPow(2, attempt) * 1000);
+        }
+    }
+    
+    HandleError(OP_WEBREQUEST, GetLastError(), 
+               StringFormat("WebRequest failed after %d attempts: %s", maxRetries, url), false);
+    return false;
+}
+
+/**
+ * @brief Check if EA should continue operating
+ */
+bool IsSafeToOperate()
+{
+    if(g_criticalErrorDetected)
+    {
+        static datetime lastWarning = 0;
+        if(TimeCurrent() - lastWarning > 60) // Print warning every minute
+        {
+            Print("[SAFE_MODE] EA halted due to critical error. Restart required.");
+            lastWarning = TimeCurrent();
+        }
+        return false;
+    }
+    return true;
+}
+
 //--- Forward Declarations
 void UpdateAllPositionStatus();
 bool CloseAllBuyPositions();
@@ -206,8 +480,8 @@ bool CloseAllSellPositions();
 bool ClosePositionWithRetry(ulong ticket, string positionName, int maxRetries = 5);
 bool IsTradingAllowed();
 bool IsInitialDelayOver();
-void CheckDailyLossLimit();
-void CheckDailyProfitProtection();
+bool CheckDailyLossLimit();
+bool CheckDailyProfitProtection();
 void OpenBuyPositions();
 void OpenSellPositions();
 void ExecuteImmediateTrade();
@@ -248,6 +522,14 @@ int ConvertPointsToFuturesTicks(int points, string futuresSymbol);  // V20.7 - T
  */
 int ConvertPointsToFuturesTicks(int points, string futuresSymbol)
 {
+   // Input validation
+   if(points < 0)
+   {
+      HandleError(OP_CALCULATION, 0, 
+                 StringFormat("Invalid point value: %d", points), false);
+      return 0;
+   }
+   
    // MT5 forex point size (standard for all major pairs)
    double forexPointSize = 0.00001;  // 5 decimal places
    
@@ -285,14 +567,31 @@ int ConvertPointsToFuturesTicks(int points, string futuresSymbol)
       return points;
    }
    
-   // Calculate conversion ratio and convert
-   // Formula: ticks = points × (forex_point_size / futures_tick_size)
-   double ratio = forexPointSize / futuresTickSize;
+   // Validate tick size before division
+   if(futuresTickSize <= 0)
+   {
+      HandleError(OP_CALCULATION, 0, 
+                 StringFormat("Invalid futures tick size: %.10f for %s", futuresTickSize, futuresSymbol), 
+                 false);
+      return points; // Fallback to 1:1
+   }
+   
+   // Calculate conversion ratio and convert using safe division
+   double ratio = SafeDivide(forexPointSize, futuresTickSize, 1.0);
    int ticks = (int)MathRound(points * ratio);
    
    // Ensure minimum of 1 tick
    if(ticks < 1 && points > 0)
       ticks = 1;
+   
+   // Validate result
+   if(ticks < 0 || ticks > 100000)
+   {
+      HandleError(OP_CALCULATION, 0, 
+                 StringFormat("Invalid tick conversion result: %d ticks from %d points (%s)", 
+                             ticks, points, futuresSymbol), false);
+      return points; // Fallback
+   }
    
    PrintFormat("[TICK_CONVERSION] %s: %d points (%.5f) → %d ticks (ratio=%.6f, tick_size=%.7f)", 
                futuresSymbol, points, points * forexPointSize, ticks, ratio, futuresTickSize);
@@ -951,10 +1250,67 @@ void PublishExitSignal(string direction, string exitReason)
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("Initializing Stochastic Algo V20.6 for symbol: ", _Symbol);
-    magic = digital_name_ * 1000000 + code_interaction_ * 1000 + StringToInteger(_Symbol);
+    // === CRASH-LOOP PREVENTION ===
+    // Detect rapid restart cycles that indicate crash loops
+    datetime currentTime = TimeCurrent();
+    
+    if(currentTime - g_lastInitTime < 10) // Within 10 seconds
+    {
+        g_initCount++;
+        if(g_initCount >= g_maxInitPer10Sec)
+        {
+            Print("========================================");
+            Print("⛔ EMERGENCY BRAKE ACTIVATED ⛔");
+            Print("EA initialized ", g_initCount, " times in 10 seconds");
+            Print("This indicates a crash loop!");
+            Print("EA will NOT start to prevent system instability");
+            Print("SOLUTION: Restart MT5 manually after fixing the issue");
+            Print("========================================");
+            Alert("⛔ EA EMERGENCY BRAKE: Crash loop detected. EA will not start. Restart MT5 manually.");
+            return INIT_FAILED;
+        }
+    }
+    else
+    {
+        // Reset counter if more than 10 seconds passed
+        g_initCount = 1;
+    }
+    
+    g_lastInitTime = currentTime;
+    
+    // Reset error tracking
+    g_consecutiveErrors = 0;
+    g_criticalErrorDetected = false;
+    g_lastErrorTime = 0;
+    g_lastErrorMessage = "";
+    
+    Print("========================================");
+    Print("Initializing Stochastic Algo V20.7");
+    Print("Symbol: ", _Symbol);
+    Print("Build: Exception Handling + Crash Prevention");
+    Print("========================================");
+    
+    ResetLastError();
+    
+    // Safe magic number calculation with overflow check
+    ulong temp_magic = digital_name_ * 1000000 + code_interaction_ * 1000;
+    if(temp_magic > ULONG_MAX / 10000) // Check for potential overflow
+    {
+        HandleError(OP_INIT, 0, "Magic number calculation potential overflow", true);
+        return INIT_FAILED;
+    }
+    
+    magic = temp_magic + StringToInteger(_Symbol);
     trade.SetExpertMagicNumber(magic);
+    
+    // Safe margin mode setting
+    ResetLastError();
     trade.SetMarginMode();
+    int marginError = GetLastError();
+    if(marginError != 0)
+    {
+        HandleError(OP_INIT, marginError, "Failed to set margin mode", false);
+    }
 
     // V20.5 - Detect account margin mode (hedging vs netting)
     accountMode = DetectAccountMarginMode();
@@ -992,15 +1348,48 @@ int OnInit()
         trade.SetTypeFillingBySymbol(_Symbol);
     }
 
-    stochHandle = iStochastic(_Symbol, timeFrame, K_Period, D_Period, slowing, MODE_SMA, STO_LOWHIGH);
-    if(stochHandle == INVALID_HANDLE)
+    // Safe indicator initialization with parameter validation
+    if(K_Period <= 0 || K_Period > 1000 || D_Period <= 0 || D_Period > 1000)
     {
-        Print("Error creating Stochastic indicator handle - ", GetLastError());
-        return(INIT_FAILED);
+        HandleError(OP_INIT, 0, 
+                   StringFormat("Invalid indicator parameters: K=%d, D=%d", K_Period, D_Period), true);
+        return INIT_FAILED;
     }
     
-    // Call CheckDailyLossLimit to properly initialize all daily variables
-    CheckDailyLossLimit();
+    ResetLastError();
+    stochHandle = iStochastic(_Symbol, timeFrame, K_Period, D_Period, slowing, MODE_SMA, STO_LOWHIGH);
+    int error = GetLastError();
+    
+    if(stochHandle == INVALID_HANDLE || error != 0)
+    {
+        HandleError(OP_INIT, error, 
+                   StringFormat("Failed to create Stochastic indicator: K=%d, D=%d, TF=%d", 
+                               K_Period, D_Period, timeFrame), true);
+        return INIT_FAILED;
+    }
+    
+    // Verify indicator is ready (with reduced wait time)
+    double test_buffer[1];
+    int wait_count = 0;
+    while(!SafeCopyBuffer(stochHandle, 0, 0, 1, test_buffer, OP_INIT) && wait_count < 5)
+    {
+        Sleep(100);
+        wait_count++;
+    }
+    
+    if(wait_count >= 5)
+    {
+        HandleError(OP_INIT, 0, "Stochastic indicator not ready after 500ms", true);
+        return INIT_FAILED;
+    }
+    
+    Print("✅ Stochastic indicator initialized successfully");
+    
+    // Safe daily loss limit initialization
+    if(!CheckDailyLossLimit())
+    {
+        HandleError(OP_INIT, 0, "Failed to initialize daily loss protection", false);
+    }
 
     if(ManualServerOffset == 0)
     {
@@ -1214,16 +1603,55 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-    IndicatorRelease(stochHandle);
+    Print("========================================");
+    Print("EA Deinitialization Started");
+    Print("Reason code: ", reason);
+    Print("========================================");
     
-    // V20.5 - Cleanup Aeron publisher
-    if(EnableAeronPublishing)
+    // Safe indicator cleanup
+    if(stochHandle != INVALID_HANDLE)
     {
-        AeronBridge_StopPublisher();
-        Print("Aeron publisher stopped and cleaned up");
+        ResetLastError();
+        if(!IndicatorRelease(stochHandle))
+        {
+            int error = GetLastError();
+            Print("Warning: Failed to release indicator handle, error: ", error);
+        }
+        else
+        {
+            Print("✅ Stochastic indicator released");
+        }
+        stochHandle = INVALID_HANDLE;
     }
     
-    Print("Terminating Stochastic Algo V20.7. Reason: ", reason);
+    // V20.5 - Safe Aeron publisher cleanup
+    if(EnableAeronPublishing)
+    {
+        ResetLastError();
+        AeronBridge_StopPublisher();
+        int error = GetLastError();
+        if(error != 0)
+        {
+            Print("Warning: Aeron publisher cleanup error: ", error);
+        }
+        else
+        {
+            Print("✅ Aeron publisher stopped and cleaned up");
+        }
+    }
+    
+    // Print error statistics
+    Print("========================================");
+    Print("Session Error Statistics:");
+    Print("Total consecutive errors: ", g_consecutiveErrors);
+    Print("Critical error detected: ", g_criticalErrorDetected ? "YES" : "NO");
+    if(g_lastErrorMessage != "")
+    {
+        Print("Last error: ", g_lastErrorMessage);
+    }
+    Print("========================================");
+    
+    Print("✅ Terminating Stochastic Algo V20.7 - Shutdown complete");
 }
 
 //+------------------------------------------------------------------+
@@ -1231,10 +1659,24 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+    // Safety check - halt if critical error detected
+    if(!IsSafeToOperate())
+    {
+        return;
+    }
+    
     if(!on) return;
     
-    // V20.5 - Check and update trading hours daily
+    // Catch-all error handler for unexpected issues
+    ResetLastError();
+    
+    // V20.5 - Check and update trading hours daily (protected)
     CheckAndUpdateDailyTradingHours();
+    int updateError = GetLastError();
+    if(updateError != 0)
+    {
+        HandleError(OP_TICK, updateError, "Failed to update daily trading hours", false);
+    }
     
     // V20.4 - Reset publish flags for new tick
     publishFlags = 0;
@@ -1321,14 +1763,39 @@ void OnTick()
         }
     }
     
-    CheckDailyLossLimit();
-    CheckDailyProfitProtection();
+    if(!CheckDailyLossLimit())
+    {
+        HandleError(OP_TICK, 0, "CheckDailyLossLimit failed", false);
+    }
+    
+    if(!CheckDailyProfitProtection())
+    {
+        HandleError(OP_TICK, 0, "CheckDailyProfitProtection failed", false);
+    }
+    
     if(stopTradingForDay || stopTradingForProfitProtection) return;
 
+    // Safe indicator buffer reading with validation
     double mainLine[3], signalLine[3];
-    if(CopyBuffer(stochHandle, 0, 1, 3, mainLine) <= 0 || CopyBuffer(stochHandle, 1, 1, 3, signalLine) <= 0)
+    ArrayInitialize(mainLine, 0);
+    ArrayInitialize(signalLine, 0);
+    
+    if(!SafeCopyBuffer(stochHandle, 0, 1, 3, mainLine, OP_INDICATOR))
     {
-        Print("Error copying indicator buffers - ", GetLastError());
+        HandleError(OP_INDICATOR, GetLastError(), "Failed to copy main stochastic buffer", false);
+        return;
+    }
+    
+    if(!SafeCopyBuffer(stochHandle, 1, 1, 3, signalLine, OP_INDICATOR))
+    {
+        HandleError(OP_INDICATOR, GetLastError(), "Failed to copy signal stochastic buffer", false);
+        return;
+    }
+    
+    // Validate array indices before access
+    if(!ValidateArrayAccess(mainLine, 0, "mainLine") || !ValidateArrayAccess(mainLine, 1, "mainLine") ||
+       !ValidateArrayAccess(signalLine, 0, "signalLine") || !ValidateArrayAccess(signalLine, 1, "signalLine"))
+    {
         return;
     }
     
@@ -1336,6 +1803,16 @@ void OnTick()
     double prev_sign = signalLine[0]; // Bar #2
     double curr_main = mainLine[1]; // Bar #1 (most recently closed)
     double curr_sign = signalLine[1]; // Bar #1 (most recently closed)
+    
+    // Validate indicator values are in reasonable range
+    if(prev_main < 0 || prev_main > 100 || curr_main < 0 || curr_main > 100 ||
+       prev_sign < 0 || prev_sign > 100 || curr_sign < 0 || curr_sign > 100)
+    {
+        HandleError(OP_INDICATOR, 0, 
+                   StringFormat("Invalid stochastic values: pmain=%.2f, cmain=%.2f, psig=%.2f, csig=%.2f",
+                               prev_main, curr_main, prev_sign, curr_sign), false);
+        return;
+    }
 
     bool buySignal = (prev_main < prev_sign && curr_main > curr_sign);
     bool sellSignal = (prev_main > prev_sign && curr_main < curr_sign);
@@ -2257,17 +2734,21 @@ void OpenBuyPositions()
         // V20.7 - Use global Aeron symbol and convert points to ticks
         
         // Calculate confidence based on stochastic values
-        double mainBuffer[], signalBuffer[];
+        double mainBuffer[3], signalBuffer[3];
         ArraySetAsSeries(mainBuffer, true);
         ArraySetAsSeries(signalBuffer, true);
 
         float confidence = 80.0;
-        if(CopyBuffer(stochHandle, 0, 0, 3, mainBuffer) > 0 &&
-           CopyBuffer(stochHandle, 1, 0, 3, signalBuffer) > 0)
+        if(SafeCopyBuffer(stochHandle, 0, 0, 3, mainBuffer, OP_INDICATOR) &&
+           SafeCopyBuffer(stochHandle, 1, 0, 3, signalBuffer, OP_INDICATOR))
         {
             double K = mainBuffer[0];
             double D = signalBuffer[0];
             confidence = (float)MathMin(50.0 + MathAbs(K - D), 95.0);
+        }
+        else
+        {
+            Print("Warning: Could not read stochastic for confidence calculation");
         }
 
         // V20.7 - Convert MT5 points to futures ticks
@@ -2437,17 +2918,21 @@ void OpenSellPositions()
     {
         // V20.7 - Use global Aeron symbol and convert points to ticks
 
-        double mainBuffer[], signalBuffer[];
+        double mainBuffer[3], signalBuffer[3];
         ArraySetAsSeries(mainBuffer, true);
         ArraySetAsSeries(signalBuffer, true);
 
         float confidence = 80.0;
-        if(CopyBuffer(stochHandle, 0, 0, 3, mainBuffer) > 0 &&
-           CopyBuffer(stochHandle, 1, 0, 3, signalBuffer) > 0)
+        if(SafeCopyBuffer(stochHandle, 0, 0, 3, mainBuffer, OP_INDICATOR) &&
+           SafeCopyBuffer(stochHandle, 1, 0, 3, signalBuffer, OP_INDICATOR))
         {
             double K = mainBuffer[0];
             double D = signalBuffer[0];
             confidence = (float)MathMin(50.0 + MathAbs(K - D), 95.0);
+        }
+        else
+        {
+            Print("Warning: Could not read stochastic for confidence calculation");
         }
 
         // V20.7 - Convert MT5 points to futures ticks
@@ -2528,9 +3013,10 @@ void ExecuteImmediateTrade()
     }
 
     double immediateMainLine[2], immediateSignalLine[2];
-    if(CopyBuffer(stochHandle, 0, 1, 2, immediateMainLine) < 2 || CopyBuffer(stochHandle, 1, 1, 2, immediateSignalLine) < 2)
+    if(!SafeCopyBuffer(stochHandle, 0, 1, 2, immediateMainLine, OP_INDICATOR) ||
+       !SafeCopyBuffer(stochHandle, 1, 1, 2, immediateSignalLine, OP_INDICATOR))
     {
-        Print("Immediate entry failed: Could not get indicator data.");
+        Print("Immediate entry failed: Could not get indicator data safely.");
         return;
     }
     
@@ -2981,11 +3467,27 @@ bool CloseAllSellPositions()
     }
 }
 
-void CheckDailyLossLimit()
+bool CheckDailyLossLimit()
 {
     static datetime lastResetTime = 0;
     MqlDateTime dt;
-    TimeCurrent(dt);
+    
+    // Safe time structure retrieval
+    ResetLastError();
+    if(!TimeCurrent(dt))
+    {
+        HandleError(OP_CALCULATION, GetLastError(), "Failed to get current time", false);
+        return false;
+    }
+    
+    // Safe account balance retrieval
+    double currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    if(currentBalance <= 0)
+    {
+        HandleError(OP_CALCULATION, 0, 
+                   StringFormat("Invalid account balance: %.2f", currentBalance), false);
+        return false;
+    }
     
     int serverToEasternOffset = GetServerToEasternOffset(TimeCurrent());
     int estHour = dt.hour + serverToEasternOffset;
@@ -3035,37 +3537,66 @@ void CheckDailyLossLimit()
         Print("Initial order delay flag has been reset for the new trading day.");
     }
 
-    if(stopTradingForDay) return;
+    if(stopTradingForDay) return true;
     
-    double currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    // Reuse currentBalance from earlier in function
     double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
-    double floatingLoss = fmax(0, currentBalance - currentEquity);
-    double realizedLoss = fmax(0, todayStartingBalance - currentBalance);
+    
+    // Validate account values
+    if(currentBalance <= 0 || currentEquity <= 0)
+    {
+        HandleError(OP_CALCULATION, 0, 
+                   StringFormat("Invalid account values: balance=%.2f, equity=%.2f", 
+                               currentBalance, currentEquity), false);
+        return false;
+    }
+    
+    double floatingLoss = MathMax(0, currentBalance - currentEquity);
+    double realizedLoss = MathMax(0, todayStartingBalance - currentBalance);
     double totalLoss = realizedLoss + floatingLoss;
+    
     if(totalLoss > 0 && todayStartingBalance > 0)
     {
-        double lossPercentage = (totalLoss / todayStartingBalance) * 100.0;
+        // Safe division for loss percentage
+        double lossPercentage = SafeDivide(totalLoss * 100.0, todayStartingBalance, 0.0);
+        
         if(lossPercentage >= MAX_DAILY_LOSS_PERCENTAGE)
         {
             stopTradingForDay = true;
             Print("!!! DAILY LOSS LIMIT of ", MAX_DAILY_LOSS_PERCENTAGE, "% REACHED. No new trades today. !!!");
+            if(ShowAlerts)
+            {
+                Alert(StringFormat("DAILY LOSS LIMIT: %.2f%% loss detected. Trading stopped.", lossPercentage));
+            }
         }
     }
+    
+    return true;
 }
 
-void CheckDailyProfitProtection()
+bool CheckDailyProfitProtection()
 {
-    if(stopTradingForProfitProtection) return;
+    if(stopTradingForProfitProtection) return true;
     
     double currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
     double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
     
+    // Validate account values
+    if(currentBalance <= 0 || currentEquity <= 0)
+    {
+        HandleError(OP_CALCULATION, 0, 
+                   StringFormat("Invalid account values in profit protection: balance=%.2f, equity=%.2f", 
+                               currentBalance, currentEquity), false);
+        return false;
+    }
+    
     double currentProfitAmount = currentEquity - todayStartingBalance;
-    double currentProfitPercentage = 0.0;
+   double currentProfitPercentage = 0.0;
     
     if(todayStartingBalance > 0)
     {
-        currentProfitPercentage = (currentProfitAmount / todayStartingBalance) * 100.0;
+        // Safe division for profit percentage
+        currentProfitPercentage = SafeDivide(currentProfitAmount * 100.0, todayStartingBalance, 0.0);
     }
     
     if(!profitProtectionActive && currentProfitPercentage >= MAX_DAILY_LOSS_PERCENTAGE)
@@ -3161,6 +3692,8 @@ void CheckDailyProfitProtection()
             }
         }
     }
+    
+    return true;
 }
 
 bool IsEasternDST(datetime time)

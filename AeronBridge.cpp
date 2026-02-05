@@ -225,7 +225,7 @@ static void ensureDefaultMap()
     // YM (E-mini Dow):
     //   - NT: 1.0 per tick | MT5 Symbol: DJ30 | MT5 _Point: 0.01
     //   - Example: 50 ticks → (50 × 1.0) ÷ 0.01 = 5000 MT5 points = 50.0 price units
-    g_map["YM"] = InstMap{ "DJ30", 0.25, 0.01 };
+    g_map["YM"] = InstMap{ "DJ30", 0.25, 0.1 };
 }
 
 // ===============================
