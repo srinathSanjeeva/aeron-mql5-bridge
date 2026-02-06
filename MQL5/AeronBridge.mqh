@@ -21,6 +21,14 @@ int  AeronBridge_StartPublisherW(string aeronDir, string channel, int streamId, 
 int  AeronBridge_PublishBinary(uchar &buffer[], int bufferLen);
 void AeronBridge_StopPublisher();
 
+// Dual Publisher API (IPC + UDP)
+int  AeronBridge_StartPublisherIpcW(string aeronDir, string channel, int streamId, int timeoutMs);
+int  AeronBridge_StartPublisherUdpW(string aeronDir, string channel, int streamId, int timeoutMs);
+int  AeronBridge_PublishBinaryIpc(uchar &buffer[], int bufferLen);
+int  AeronBridge_PublishBinaryUdp(uchar &buffer[], int bufferLen);
+void AeronBridge_StopPublisherIpc();
+void AeronBridge_StopPublisherUdp();
+
 #import
 
 #endif // AERON_BRIDGE_MQH

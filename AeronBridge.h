@@ -84,6 +84,40 @@ extern "C" {
     // Stop/cleanup publisher
     __declspec(dllexport) void AeronBridge_StopPublisher();
 
+    // ===============================
+    // Dual Publisher API (IPC + UDP)
+    // ===============================
+
+    // Start Aeron IPC publisher
+    __declspec(dllexport) int AeronBridge_StartPublisherIpcW(
+        const wchar_t* aeronDir,
+        const wchar_t* channel,
+        int streamId,
+        int timeoutMs);
+
+    // Start Aeron UDP publisher
+    __declspec(dllexport) int AeronBridge_StartPublisherUdpW(
+        const wchar_t* aeronDir,
+        const wchar_t* channel,
+        int streamId,
+        int timeoutMs);
+
+    // Publish binary signal to IPC channel
+    __declspec(dllexport) int AeronBridge_PublishBinaryIpc(
+        const unsigned char* buffer,
+        int bufferLen);
+
+    // Publish binary signal to UDP channel
+    __declspec(dllexport) int AeronBridge_PublishBinaryUdp(
+        const unsigned char* buffer,
+        int bufferLen);
+
+    // Stop/cleanup IPC publisher
+    __declspec(dllexport) void AeronBridge_StopPublisherIpc();
+
+    // Stop/cleanup UDP publisher
+    __declspec(dllexport) void AeronBridge_StopPublisherUdp();
+
 #ifdef __cplusplus
 }
 #endif

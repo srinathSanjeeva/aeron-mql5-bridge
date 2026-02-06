@@ -5,6 +5,15 @@
 //| IMPORTANT: Include AeronBridge.mqh BEFORE this file in your EA  |
 //+------------------------------------------------------------------+
 
+// Publish mode enum (matches C# AeronPublishMode)
+enum ENUM_AERON_PUBLISH_MODE
+{
+   AERON_PUBLISH_NONE = 0,      // No publishing
+   AERON_PUBLISH_IPC_ONLY = 1,  // IPC only
+   AERON_PUBLISH_UDP_ONLY = 2,  // UDP only
+   AERON_PUBLISH_IPC_AND_UDP = 3 // Both IPC and UDP
+};
+
 // Protocol constants (must match C# publisher - AeronSignalPublisher.cs)
 #define AERON_MAGIC        0xA330BEEF  // Will be interpreted as signed int
 #define AERON_VERSION      1
@@ -139,7 +148,7 @@ long GetTimestampNanos()
 {
    // Unix epoch: 1970-01-01 00:00:00
    datetime unixEpoch = D'1970.01.01';
-   datetime now = TimeCurrent();
+   datetime now = TimeGMT();  // FIXED: Use UTC time to match NinjaTrader
    
    // Seconds since epoch
    long seconds = (long)(now - unixEpoch);
@@ -234,7 +243,8 @@ bool AeronPublishSignal(
       return false;
    }
    
-   // Publish via DLL
+   // Publish via DLL (with error reset for crash prevention)
+   ResetLastError();
    int result = AeronBridge_PublishBinary(buffer, AERON_FRAME_SIZE);
    if(result == 0)
    {
@@ -243,6 +253,222 @@ bool AeronPublishSignal(
    }
    
    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Encode and publish to IPC channel only                          |
+//+------------------------------------------------------------------+
+bool AeronPublishSignalIpc(
+   string symbol,
+   string instrument,
+   AeronStrategyAction action,
+   int longSL,
+   int shortSL,
+   int profitTarget,
+   int qty,
+   float confidence,
+   string source
+)
+{
+   uchar buffer[AERON_FRAME_SIZE];
+   ArrayInitialize(buffer, 0);
+   
+   int offset = 0;
+   
+   // MAGIC (4 bytes)
+   WriteInt32LE(buffer, offset, (int)AERON_MAGIC);
+   offset += 4;
+   
+   // VERSION (2 bytes)
+   WriteInt16LE(buffer, offset, AERON_VERSION);
+   offset += 2;
+   
+   // ACTION (2 bytes)
+   WriteInt16LE(buffer, offset, (int)action);
+   offset += 2;
+   
+   // TIMESTAMP (8 bytes)
+   WriteInt64LE(buffer, offset, GetTimestampNanos());
+   offset += 8;
+   
+   // LONG_SL (4 bytes)
+   WriteInt32LE(buffer, offset, longSL);
+   offset += 4;
+   
+   // SHORT_SL (4 bytes)
+   WriteInt32LE(buffer, offset, shortSL);
+   offset += 4;
+   
+   // PROFIT_TARGET (4 bytes)
+   WriteInt32LE(buffer, offset, profitTarget);
+   offset += 4;
+   
+   // QTY (4 bytes)
+   WriteInt32LE(buffer, offset, qty);
+   offset += 4;
+   
+   // CONFIDENCE (4 bytes float)
+   WriteFloat32LE(buffer, offset, confidence);
+   offset += 4;
+   
+   // SYMBOL (16 bytes)
+   WriteAsciiPadded(buffer, offset, symbol, SYMBOL_LEN);
+   offset += SYMBOL_LEN;
+   
+   // INSTRUMENT (32 bytes)
+   WriteAsciiPadded(buffer, offset, instrument, INSTRUMENT_LEN);
+   offset += INSTRUMENT_LEN;
+   
+   // SOURCE (16 bytes)
+   WriteAsciiPadded(buffer, offset, source, SOURCE_LEN);
+   offset += SOURCE_LEN;
+   
+   // PADDING (4 bytes)
+   offset += 4;
+   
+   if(offset != AERON_FRAME_SIZE)
+   {
+      PrintFormat("[AERON_ERROR] IPC Frame size mismatch: %d != %d", offset, AERON_FRAME_SIZE);
+      return false;
+   }
+   
+   // Publish to IPC channel (with error reset for crash prevention)
+   ResetLastError();
+   int result = AeronBridge_PublishBinaryIpc(buffer, AERON_FRAME_SIZE);
+   if(result == 0)
+   {
+      Print("[AERON_ERROR] Failed to publish signal to IPC channel");
+      return false;
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Encode and publish to UDP channel only                          |
+//+------------------------------------------------------------------+
+bool AeronPublishSignalUdp(
+   string symbol,
+   string instrument,
+   AeronStrategyAction action,
+   int longSL,
+   int shortSL,
+   int profitTarget,
+   int qty,
+   float confidence,
+   string source
+)
+{
+   uchar buffer[AERON_FRAME_SIZE];
+   ArrayInitialize(buffer, 0);
+   
+   int offset = 0;
+   
+   // MAGIC (4 bytes)
+   WriteInt32LE(buffer, offset, (int)AERON_MAGIC);
+   offset += 4;
+   
+   // VERSION (2 bytes)
+   WriteInt16LE(buffer, offset, AERON_VERSION);
+   offset += 2;
+   
+   // ACTION (2 bytes)
+   WriteInt16LE(buffer, offset, (int)action);
+   offset += 2;
+   
+   // TIMESTAMP (8 bytes)
+   WriteInt64LE(buffer, offset, GetTimestampNanos());
+   offset += 8;
+   
+   // LONG_SL (4 bytes)
+   WriteInt32LE(buffer, offset, longSL);
+   offset += 4;
+   
+   // SHORT_SL (4 bytes)
+   WriteInt32LE(buffer, offset, shortSL);
+   offset += 4;
+   
+   // PROFIT_TARGET (4 bytes)
+   WriteInt32LE(buffer, offset, profitTarget);
+   offset += 4;
+   
+   // QTY (4 bytes)
+   WriteInt32LE(buffer, offset, qty);
+   offset += 4;
+   
+   // CONFIDENCE (4 bytes float)
+   WriteFloat32LE(buffer, offset, confidence);
+   offset += 4;
+   
+   // SYMBOL (16 bytes)
+   WriteAsciiPadded(buffer, offset, symbol, SYMBOL_LEN);
+   offset += SYMBOL_LEN;
+   
+   // INSTRUMENT (32 bytes)
+   WriteAsciiPadded(buffer, offset, instrument, INSTRUMENT_LEN);
+   offset += INSTRUMENT_LEN;
+   
+   // SOURCE (16 bytes)
+   WriteAsciiPadded(buffer, offset, source, SOURCE_LEN);
+   offset += SOURCE_LEN;
+   
+   // PADDING (4 bytes)
+   offset += 4;
+   
+   if(offset != AERON_FRAME_SIZE)
+   {
+      PrintFormat("[AERON_ERROR] UDP Frame size mismatch: %d != %d", offset, AERON_FRAME_SIZE);
+      return false;
+   }
+   
+   // Publish to UDP channel (with error reset for crash prevention)
+   ResetLastError();
+   int result = AeronBridge_PublishBinaryUdp(buffer, AERON_FRAME_SIZE);
+   if(result == 0)
+   {
+      Print("[AERON_ERROR] Failed to publish signal to UDP channel");
+      return false;
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Publish to both IPC and UDP channels (convenience function)     |
+//+------------------------------------------------------------------+
+bool AeronPublishSignalDual(
+   string symbol,
+   string instrument,
+   AeronStrategyAction action,
+   int longSL,
+   int shortSL,
+   int profitTarget,
+   int qty,
+   float confidence,
+   string source,
+   ENUM_AERON_PUBLISH_MODE publishMode
+)
+{
+   bool success = true;
+   
+   switch(publishMode)
+   {
+      case AERON_PUBLISH_IPC_ONLY:
+         return AeronPublishSignalIpc(symbol, instrument, action, longSL, shortSL, profitTarget, qty, confidence, source);
+         
+      case AERON_PUBLISH_UDP_ONLY:
+         return AeronPublishSignalUdp(symbol, instrument, action, longSL, shortSL, profitTarget, qty, confidence, source);
+         
+      case AERON_PUBLISH_IPC_AND_UDP:
+         // Publish to both channels
+         success = AeronPublishSignalIpc(symbol, instrument, action, longSL, shortSL, profitTarget, qty, confidence, source);
+         success = AeronPublishSignalUdp(symbol, instrument, action, longSL, shortSL, profitTarget, qty, confidence, source) && success;
+         return success;
+         
+      case AERON_PUBLISH_NONE:
+      default:
+         return true; // No-op
+   }
 }
 
 //+------------------------------------------------------------------+
