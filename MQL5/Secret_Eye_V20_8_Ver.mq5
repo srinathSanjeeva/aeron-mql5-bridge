@@ -4,6 +4,16 @@
 //|                                             https://www.sanjeevas.com|
 //+------------------------------------------------------------------+
 
+// V20.8.3 Hotfix - Aeron Publisher Restart Fix (Intermittent Failure Resolution):
+// - Added global state tracking (g_AeronIpcStarted, g_AeronUdpStarted, g_LastPublisherCleanup)
+// - Implemented CleanupAeronPublishersForce() for unconditional cleanup at startup
+// - Added 200ms delay after cleanup to ensure DLL resources are fully released
+// - Enhanced OnInit() to check publisher state before starting (prevents double-start)
+// - Improved OnDeinit() to track cleanup timestamps and only cleanup active publishers
+// - Better error messages indicating possible cleanup issues and retry guidance
+// - Prevents race condition where previous EA instance leaves orphaned publishers
+// - Fixes intermittent "Failed to start Aeron publisher" errors on restart
+//
 // V20.8 Release - Multi-Channel Aeron Publishing Architecture:
 // - Enhanced Aeron publishing with ENUM_AERON_PUBLISH_MODE configuration system
 // - Replaced EnableAeronPublishing (bool) with AeronPublishMode (enum: None/IPC/UDP/Both)
@@ -58,8 +68,8 @@
 
 #property copyright "Copyright 2025, Sanjeevas Inc."
 #property link      "https://www.sanjeevas.com"
-#property version   "20.82"
-#property description "V20.8.2 - Timestamp Fix: UTC time for Aeron signals, Exception Handling, Multi-Channel Aeron"
+#property version   "20.83"
+#property description "V20.8.3 - Restart Fix: Publisher state tracking + forced cleanup + delay, Exception Handling"
 #include <Trade\Trade.mqh>
 #include "AeronBridge.mqh"
 #include "AeronPublisher.mqh"
@@ -160,7 +170,7 @@ input string            AeronInstrumentName = "";          // Custom symbol/inst
 //--- Global variables
 CTrade              trade;
 int                 stochHandle;
-static ulong        magic;                      // Expert magic number
+static ulong        g_ExpertMagic;              // Expert magic number
 static datetime     lastBarTime = 0;
 static double       todayStartingBalance = 0;
 bool                stopTradingForDay = false;
@@ -179,6 +189,11 @@ static bool         immediateEntryCompleted = false;
 // V20.7 - Futures Symbol Mapping for Aeron
 static string       g_AeronSymbol = "";       // Resolved futures symbol (e.g., "6A", "ES")
 static string       g_AeronInstrument = "";   // Full instrument name (e.g., "6A Futures")
+
+// V20.8.3 - Aeron Publisher State Tracking (Restart Fix)
+static bool         g_AeronIpcStarted = false;  // Track IPC publisher state
+static bool         g_AeronUdpStarted = false;  // Track UDP publisher state
+static datetime     g_LastPublisherCleanup = 0; // Track last cleanup time
 
 // V20.1 - Daily Profit Protection Variables
 static double       dailyMaxProfitBalance = 0;
@@ -283,6 +298,7 @@ bool ParseTimeString(string timeStr, int &hour, int &minute);
 ENUM_ACCOUNT_MODE DetectAccountMarginMode();
 int CountPositionsByTypeAndSymbol(ENUM_POSITION_TYPE posType);
 int ConvertPointsToFuturesTicks(int points, string futuresSymbol);  // V20.7 - Tick conversion
+void CleanupAeronPublishersForce();  // V20.8.3 - Force publisher cleanup for restart fix
 
 //+------------------------------------------------------------------+
 //| V20.5 - Account Margin Mode Detection                           |
@@ -333,7 +349,7 @@ int CountPositionsByTypeAndSymbol(ENUM_POSITION_TYPE posType)
             ulong posMagic = PositionGetInteger(POSITION_MAGIC);
             ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
             
-            if(posMagic == magic && type == posType)
+            if(posMagic == g_ExpertMagic && type == posType)
             {
                 count++;
             }
@@ -933,6 +949,78 @@ void PublishExitSignal(string direction, string exitReason)
 }
 
 //+------------------------------------------------------------------+
+//| V20.8.3 - Force cleanup of Aeron publishers (Restart Fix)      |
+//| Enhanced with exception handling for maximum reliability        |
+//+------------------------------------------------------------------+
+void CleanupAeronPublishersForce()
+{
+    Print("=== FORCED AERON CLEANUP ===");
+    
+    // Safety check - verify we're in a safe state to operate
+    if(!IsSafeToOperate())
+    {
+        Print("⚠️ WARNING: System in error state - cleanup may be unreliable");
+        Print("Attempting cleanup anyway to recover from errors...");
+    }
+    
+    // Check if we recently cleaned up (within 2 seconds)
+    datetime currentTime = TimeCurrent();
+    if(g_LastPublisherCleanup > 0 && (currentTime - g_LastPublisherCleanup) < 2)
+    {
+        Print("Recent cleanup detected (", (currentTime - g_LastPublisherCleanup), "s ago) - skipping");
+        return;
+    }
+    
+    // Unconditionally attempt cleanup (handles orphaned publishers)
+    // Wrap DLL calls with exception handling
+    Print("Attempting to stop any orphaned IPC publishers...");
+    ResetLastError();
+    
+    // Try-catch equivalent for DLL call
+    bool ipcCleanupSuccess = true;
+    AeronBridge_StopPublisherIpc();
+    int errorIpc = GetLastError();
+    
+    if(errorIpc != 0)
+    {
+        ipcCleanupSuccess = false;
+        HandleError(OP_DLL_CALL, errorIpc, "IPC publisher cleanup - expected if not running", false);
+    }
+    else
+    {
+        Print("✅ IPC publisher cleanup successful");
+    }
+    g_AeronIpcStarted = false;
+    
+    Print("Attempting to stop any orphaned UDP publishers...");
+    ResetLastError();
+    
+    // Try-catch equivalent for DLL call
+    bool udpCleanupSuccess = true;
+    AeronBridge_StopPublisherUdp();
+    int errorUdp = GetLastError();
+    
+    if(errorUdp != 0)
+    {
+        udpCleanupSuccess = false;
+        HandleError(OP_DLL_CALL, errorUdp, "UDP publisher cleanup - expected if not running", false);
+    }
+    else
+    {
+        Print("✅ UDP publisher cleanup successful");
+    }
+    g_AeronUdpStarted = false;
+    
+    // Wait briefly to ensure cleanup completes
+    Sleep(200);
+    
+    g_LastPublisherCleanup = currentTime;
+    Print("Force cleanup complete - ready for fresh start");
+    Print("Status: IPC=", (ipcCleanupSuccess ? "OK" : "WARN"), ", UDP=", (udpCleanupSuccess ? "OK" : "WARN"));
+    Print("============================");
+}
+
+//+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -971,10 +1059,17 @@ int OnInit()
     g_lastErrorTime = 0;
     g_lastErrorMessage = "";
     
+    // V20.8.3 - Force cleanup of any orphaned publishers from previous instance
+    // Only call DLL cleanup when Aeron publishing is actually enabled
+    if(AeronPublishMode != AERON_PUBLISH_NONE)
+    {
+        CleanupAeronPublishersForce();
+    }
+    
     Print("========================================");
-    Print("Initializing Stochastic Algo V20.8.2");
+    Print("Initializing Stochastic Algo V20.8.3");
     Print("Symbol: ", _Symbol);
-    Print("Build: Timestamp Fix (UTC) + Exception Handling");
+    Print("Build: Restart Fix + UTC Timestamp + Exception Handling");
     Print("========================================");
     
     ResetLastError();
@@ -987,8 +1082,8 @@ int OnInit()
         return INIT_FAILED;
     }
     
-    magic = temp_magic + StringToInteger(_Symbol);
-    trade.SetExpertMagicNumber(magic);
+    g_ExpertMagic = temp_magic + StringToInteger(_Symbol);
+    trade.SetExpertMagicNumber(g_ExpertMagic);
     
     // Safe margin mode setting
     ResetLastError();
@@ -1231,36 +1326,61 @@ int OnInit()
             Print("Starting IPC Publisher...");
             Print("IPC Channel: ", AeronPublishChannelIpc);
             
+            // V20.8.3 RESTART FIX - Check if already started
+            if(g_AeronIpcStarted)
+            {
+                Print("⚠️ WARNING: IPC publisher already marked as started - forcing cleanup");
+                ResetLastError();
+                AeronBridge_StopPublisherIpc();
+                int cleanupError = GetLastError();
+                if(cleanupError != 0)
+                {
+                    HandleError(OP_DLL_CALL, cleanupError, "Force cleanup of IPC publisher before restart", false);
+                }
+                Sleep(100); // Allow time for cleanup
+                g_AeronIpcStarted = false;
+            }
+            
             // V20.8 CRASH FIX - Reset error before DLL call
             ResetLastError();
             
+            // Safe DLL call with exception handling
             int resultIpc = AeronBridge_StartPublisherIpcW(
                 AeronPublishDir,
                 AeronPublishChannelIpc,
                 AeronPublishStreamId,
                 3000);
             
-            if(resultIpc == 0)
+            int dllError = GetLastError();
+            
+            if(resultIpc == 0 || dllError != 0)
             {
                 uchar errBuf[512];
                 ArrayInitialize(errBuf, 0);
                 int errLen = AeronBridge_LastError(errBuf, ArraySize(errBuf));
                 string errMsg = (errLen > 0) ? CharArrayToString(errBuf, 0, errLen) : "Unknown error";
                 
+                // Use exception handling system
+                string detailedMsg = StringFormat("Failed to start IPC publisher: %s | Possible: MediaDriver not running, invalid path/channel, or orphaned instance", errMsg);
+                HandleError(OP_DLL_CALL, dllError, detailedMsg, false);
+                
                 PrintFormat("ERROR: Failed to start Aeron IPC publisher: %s", errMsg);
                 PrintFormat("Possible causes:");
                 PrintFormat("  - MediaDriver not running");
                 PrintFormat("  - Incorrect Aeron directory path");
                 PrintFormat("  - Invalid IPC channel format");
+                PrintFormat("  - Previous instance not fully cleaned up (retry in 5 seconds)");
                 
                 if(ShowAlerts)
                 {
                     Alert("⚠️ ERROR: Failed to start Aeron IPC publisher: ", errMsg);
                 }
+                g_AeronIpcStarted = false;
             }
             else
             {
                 ipcStarted = true;
+                g_AeronIpcStarted = true;
                 Print("✅ Aeron IPC publisher started successfully");
                 Print("IPC consumers can subscribe on channel: ", AeronPublishChannelIpc);
             }
@@ -1272,21 +1392,43 @@ int OnInit()
             Print("Starting UDP Publisher...");
             Print("UDP Channel: ", AeronPublishChannelUdp);
             
+            // V20.8.3 RESTART FIX - Check if already started
+            if(g_AeronUdpStarted)
+            {
+                Print("⚠️ WARNING: UDP publisher already marked as started - forcing cleanup");
+                ResetLastError();
+                AeronBridge_StopPublisherUdp();
+                int cleanupError = GetLastError();
+                if(cleanupError != 0)
+                {
+                    HandleError(OP_DLL_CALL, cleanupError, "Force cleanup of UDP publisher before restart", false);
+                }
+                Sleep(100); // Allow time for cleanup
+                g_AeronUdpStarted = false;
+            }
+            
             // V20.8 CRASH FIX - Reset error before DLL call
             ResetLastError();
             
+            // Safe DLL call with exception handling
             int resultUdp = AeronBridge_StartPublisherUdpW(
                 AeronPublishDir,
                 AeronPublishChannelUdp,
                 AeronPublishStreamId,
                 3000);
             
-            if(resultUdp == 0)
+            int dllError = GetLastError();
+            
+            if(resultUdp == 0 || dllError != 0)
             {
                 uchar errBuf[512];
                 ArrayInitialize(errBuf, 0);
                 int errLen = AeronBridge_LastError(errBuf, ArraySize(errBuf));
                 string errMsg = (errLen > 0) ? CharArrayToString(errBuf, 0, errLen) : "Unknown error";
+                
+                // Use exception handling system
+                string detailedMsg = StringFormat("Failed to start UDP publisher: %s | Possible: MediaDriver not running, invalid path/channel/firewall, or orphaned instance", errMsg);
+                HandleError(OP_DLL_CALL, dllError, detailedMsg, false);
                 
                 PrintFormat("ERROR: Failed to start Aeron UDP publisher: %s", errMsg);
                 PrintFormat("Possible causes:");
@@ -1294,15 +1436,18 @@ int OnInit()
                 PrintFormat("  - Incorrect Aeron directory path");
                 PrintFormat("  - Invalid UDP channel format or endpoint");
                 PrintFormat("  - Firewall blocking UDP port");
+                PrintFormat("  - Previous instance not fully cleaned up (retry in 5 seconds)");
                 
                 if(ShowAlerts)
                 {
                     Alert("⚠️ ERROR: Failed to start Aeron UDP publisher: ", errMsg);
                 }
+                g_AeronUdpStarted = false;
             }
             else
             {
                 udpStarted = true;
+                g_AeronUdpStarted = true;
                 Print("✅ Aeron UDP publisher started successfully");
                 Print("UDP consumers can subscribe on channel: ", AeronPublishChannelUdp);
             }
@@ -1378,40 +1523,49 @@ void OnDeinit(const int reason)
         stochHandle = INVALID_HANDLE;
     }
     
-    // V20.7 - Safe Aeron publisher cleanup (multi-channel)
+    // V20.8.3 - Safe Aeron publisher cleanup with state tracking and exception handling
     if(AeronPublishMode != AERON_PUBLISH_NONE)
     {
         Print("Cleaning up Aeron publishers...");
         
-        if(AeronPublishMode == AERON_PUBLISH_IPC_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP)
+        if((AeronPublishMode == AERON_PUBLISH_IPC_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP) && g_AeronIpcStarted)
         {
+            Print("Stopping IPC publisher...");
             ResetLastError();
             AeronBridge_StopPublisherIpc();
             int errorIpc = GetLastError();
             if(errorIpc != 0)
             {
+                HandleError(OP_DLL_CALL, errorIpc, "IPC publisher cleanup during OnDeinit", false);
                 Print("Warning: Aeron IPC publisher cleanup error: ", errorIpc);
             }
             else
             {
                 Print("✅ Aeron IPC publisher stopped and cleaned up");
             }
+            g_AeronIpcStarted = false;
         }
         
-        if(AeronPublishMode == AERON_PUBLISH_UDP_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP)
+        if((AeronPublishMode == AERON_PUBLISH_UDP_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP) && g_AeronUdpStarted)
         {
+            Print("Stopping UDP publisher...");
             ResetLastError();
             AeronBridge_StopPublisherUdp();
             int errorUdp = GetLastError();
             if(errorUdp != 0)
             {
+                HandleError(OP_DLL_CALL, errorUdp, "UDP publisher cleanup during OnDeinit", false);
                 Print("Warning: Aeron UDP publisher cleanup error: ", errorUdp);
             }
             else
             {
                 Print("✅ Aeron UDP publisher stopped and cleaned up");
             }
+            g_AeronUdpStarted = false;
         }
+        
+        g_LastPublisherCleanup = TimeCurrent();
+        Print("Publisher cleanup timestamp recorded: ", TimeToString(g_LastPublisherCleanup));
     }
     
     // Print error statistics
@@ -1425,7 +1579,7 @@ void OnDeinit(const int reason)
     }
     Print("========================================");
     
-    Print("✅ Terminating Stochastic Algo V20.8.2 - Shutdown complete");
+    Print("✅ Terminating Stochastic Algo V20.8.3 - Shutdown complete");
 }
 
 //+------------------------------------------------------------------+
@@ -1696,7 +1850,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
     }
     
     ulong dealMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
-    if(dealMagic != magic)
+    if(dealMagic != g_ExpertMagic)
     {
         return;
     }
@@ -2455,7 +2609,7 @@ void OpenBuyPositions()
             if(PositionSelectByTicket(PositionGetTicket(i)))
             {
                 if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
-                   PositionGetInteger(POSITION_MAGIC) == magic &&
+                   PositionGetInteger(POSITION_MAGIC) == g_ExpertMagic &&
                    PositionGetString(POSITION_COMMENT) == "Scalp Buy")
                 {
                     scalpBuyTicket = PositionGetTicket(i);
@@ -2482,7 +2636,7 @@ void OpenBuyPositions()
             if(PositionSelectByTicket(PositionGetTicket(i)))
             {
                 if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
-                   PositionGetInteger(POSITION_MAGIC) == magic &&
+                   PositionGetInteger(POSITION_MAGIC) == g_ExpertMagic &&
                    PositionGetString(POSITION_COMMENT) == "Trend Buy")
                 {
                     trendBuyTicket = PositionGetTicket(i);
@@ -2640,7 +2794,7 @@ void OpenSellPositions()
             if(PositionSelectByTicket(PositionGetTicket(i)))
             {
                 if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
-                   PositionGetInteger(POSITION_MAGIC) == magic &&
+                   PositionGetInteger(POSITION_MAGIC) == g_ExpertMagic &&
                    PositionGetString(POSITION_COMMENT) == "Scalp Sell")
                 {
                     scalpSellTicket = PositionGetTicket(i);
@@ -2667,7 +2821,7 @@ void OpenSellPositions()
             if(PositionSelectByTicket(PositionGetTicket(i)))
             {
                 if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
-                   PositionGetInteger(POSITION_MAGIC) == magic &&
+                   PositionGetInteger(POSITION_MAGIC) == g_ExpertMagic &&
                    PositionGetString(POSITION_COMMENT) == "Trend Sell")
                 {
                     trendSellTicket = PositionGetTicket(i);
@@ -2837,7 +2991,7 @@ void RecoverExistingPositions()
         if(PositionSelectByTicket(ticket))
         {
             if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
-               PositionGetInteger(POSITION_MAGIC) == magic)
+               PositionGetInteger(POSITION_MAGIC) == g_ExpertMagic)
             {
                 string comment = PositionGetString(POSITION_COMMENT);
                 ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
@@ -2924,7 +3078,7 @@ bool PositionExistsByTicket(ulong ticket)
             if(PositionSelectByTicket(ticket))
             {
                 if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
-                   PositionGetInteger(POSITION_MAGIC) == magic)
+                   PositionGetInteger(POSITION_MAGIC) == g_ExpertMagic)
                 {
                     return true;
                 }
@@ -3067,7 +3221,7 @@ bool CloseAllBuyPositions()
 {
     Print("=== CLOSING ALL BUY POSITIONS ===");
     Print("Account Mode: ", (accountMode == MODE_HEDGING ? "HEDGING" : "NETTING"));
-    Print("Symbol: ", _Symbol, " | Magic: ", magic);
+    Print("Symbol: ", _Symbol, " | Magic: ", g_ExpertMagic);
     
     bool allClosed = true;
     
@@ -3119,7 +3273,7 @@ bool CloseAllBuyPositions()
                     ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
                     ulong posTicket = PositionGetInteger(POSITION_TICKET);
                     
-                    if(posMagic == magic && posType == POSITION_TYPE_BUY)
+                    if(posMagic == g_ExpertMagic && posType == POSITION_TYPE_BUY)
                     {
                         Print("Found orphaned buy position #", posTicket, " - attempting closure");
                         if(!ClosePositionWithRetry(posTicket, "Orphaned Buy", MaxClosureRetries))
@@ -3159,7 +3313,7 @@ bool CloseAllSellPositions()
 {
     Print("=== CLOSING ALL SELL POSITIONS ===");
     Print("Account Mode: ", (accountMode == MODE_HEDGING ? "HEDGING" : "NETTING"));
-    Print("Symbol: ", _Symbol, " | Magic: ", magic);
+    Print("Symbol: ", _Symbol, " | Magic: ", g_ExpertMagic);
     
     bool allClosed = true;
     
@@ -3211,7 +3365,7 @@ bool CloseAllSellPositions()
                     ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
                     ulong posTicket = PositionGetInteger(POSITION_TICKET);
                     
-                    if(posMagic == magic && posType == POSITION_TYPE_SELL)
+                    if(posMagic == g_ExpertMagic && posType == POSITION_TYPE_SELL)
                     {
                         Print("Found orphaned sell position #", posTicket, " - attempting closure");
                         if(!ClosePositionWithRetry(posTicket, "Orphaned Sell", MaxClosureRetries))

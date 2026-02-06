@@ -96,6 +96,8 @@ static std::atomic<int> g_pubStarted{ 0 };
 // ===============================
 // Helpers
 // ===============================
+static void cleanupAeronContextIfIdle();  // forward declaration
+
 static void setErrorLocked(const std::string& s)
 {
     g_lastError = s;
@@ -505,18 +507,6 @@ void AeronBridge_Stop()
         g_subscription = nullptr;
     }
 
-    if (g_aeron)
-    {
-        aeron_close(g_aeron);
-        g_aeron = nullptr;
-    }
-
-    if (g_context)
-    {
-        aeron_context_close(g_context);
-        g_context = nullptr;
-    }
-
     g_asyncSub = nullptr;
     g_started.store(0);
 
@@ -526,6 +516,9 @@ void AeronBridge_Stop()
         while (!g_signalQueue.empty())
             g_signalQueue.pop();
     }
+
+    // Only close shared context if no publishers are still active
+    cleanupAeronContextIfIdle();
 }
 
 int AeronBridge_LastError(unsigned char* outBuf, int outBufLen)
@@ -716,6 +709,8 @@ void AeronBridge_StopPublisher()
     }
     g_asyncPub = nullptr;
     g_pubStarted.store(0);
+
+    cleanupAeronContextIfIdle();
 }
 
 // ===============================
@@ -1008,6 +1003,26 @@ int AeronBridge_PublishBinaryUdp(const unsigned char* buffer, int bufferLen)
     return 1;
 }
 
+// Helper: clean up shared Aeron context when nothing is using it
+static void cleanupAeronContextIfIdle()
+{
+    // Don't close if any publisher or subscriber is still active
+    if (g_publicationIpc || g_publicationUdp || g_publication || g_subscription)
+        return;
+
+    if (g_aeron)
+    {
+        aeron_close(g_aeron);
+        g_aeron = nullptr;
+    }
+
+    if (g_context)
+    {
+        aeron_context_close(g_context);
+        g_context = nullptr;
+    }
+}
+
 void AeronBridge_StopPublisherIpc()
 {
     if (g_publicationIpc)
@@ -1017,6 +1032,8 @@ void AeronBridge_StopPublisherIpc()
     }
     g_asyncPubIpc = nullptr;
     g_pubIpcStarted.store(0);
+
+    cleanupAeronContextIfIdle();
 }
 
 void AeronBridge_StopPublisherUdp()
@@ -1028,4 +1045,6 @@ void AeronBridge_StopPublisherUdp()
     }
     g_asyncPubUdp = nullptr;
     g_pubUdpStarted.store(0);
+
+    cleanupAeronContextIfIdle();
 }
