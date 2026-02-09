@@ -2604,22 +2604,10 @@ void OpenBuyPositions()
 
     if(scalpLot > 0 && trade.Buy(scalpLot, _Symbol, ask, buyStopLoss, scalpTakeProfit, "Scalp Buy"))
     {
-        for(int i = PositionsTotal() - 1; i >= 0; i--)
-        {
-            if(PositionSelectByTicket(PositionGetTicket(i)))
-            {
-                if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
-                   PositionGetInteger(POSITION_MAGIC) == g_ExpertMagic &&
-                   PositionGetString(POSITION_COMMENT) == "Scalp Buy")
-                {
-                    scalpBuyTicket = PositionGetTicket(i);
-                    scalpBuyOpened = true;
-                    Print("Scalp Buy Opened: #", scalpBuyTicket);
-                    if(ShowAlerts) Alert("Scalp BUY Order Success for ", _Symbol, " - Ticket: #", scalpBuyTicket);
-                    break;
-                }
-            }
-        }
+        scalpBuyTicket = trade.ResultOrder();
+        scalpBuyOpened = true;
+        Print("Scalp Buy Opened: #", scalpBuyTicket);
+        if(ShowAlerts) Alert("Scalp BUY Order Success for ", _Symbol, " - Ticket: #", scalpBuyTicket);
     }
     else if(scalpLot > 0)
     {
@@ -2631,22 +2619,10 @@ void OpenBuyPositions()
     
     if(trendLot > 0 && trade.Buy(trendLot, _Symbol, ask, buyStopLoss, 0, "Trend Buy"))
     {
-        for(int i = PositionsTotal() - 1; i >= 0; i--)
-        {
-            if(PositionSelectByTicket(PositionGetTicket(i)))
-            {
-                if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
-                   PositionGetInteger(POSITION_MAGIC) == g_ExpertMagic &&
-                   PositionGetString(POSITION_COMMENT) == "Trend Buy")
-                {
-                    trendBuyTicket = PositionGetTicket(i);
-                    trendBuyOpened = true;
-                    Print("Trend Buy Opened: #", trendBuyTicket);
-                    if(ShowAlerts) Alert("Trend BUY Order Success for ", _Symbol, " - Ticket: #", trendBuyTicket);
-                    break;
-                }
-            }
-        }
+        trendBuyTicket = trade.ResultOrder();
+        trendBuyOpened = true;
+        Print("Trend Buy Opened: #", trendBuyTicket);
+        if(ShowAlerts) Alert("Trend BUY Order Success for ", _Symbol, " - Ticket: #", trendBuyTicket);
     }
     else if(trendLot > 0)
     {
@@ -2789,22 +2765,10 @@ void OpenSellPositions()
 
     if(scalpLot > 0 && trade.Sell(scalpLot, _Symbol, bid, sellStopLoss, scalpTakeProfit, "Scalp Sell"))
     {
-        for(int i = PositionsTotal() - 1; i >= 0; i--)
-        {
-            if(PositionSelectByTicket(PositionGetTicket(i)))
-            {
-                if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
-                   PositionGetInteger(POSITION_MAGIC) == g_ExpertMagic &&
-                   PositionGetString(POSITION_COMMENT) == "Scalp Sell")
-                {
-                    scalpSellTicket = PositionGetTicket(i);
-                    scalpSellOpened = true;
-                    Print("Scalp Sell Opened: #", scalpSellTicket);
-                    if(ShowAlerts) Alert("Scalp SELL Order Success for ", _Symbol, " - Ticket: #", scalpSellTicket);
-                    break;
-                }
-            }
-        }
+        scalpSellTicket = trade.ResultOrder();
+        scalpSellOpened = true;
+        Print("Scalp Sell Opened: #", scalpSellTicket);
+        if(ShowAlerts) Alert("Scalp SELL Order Success for ", _Symbol, " - Ticket: #", scalpSellTicket);
     }
     else if(scalpLot > 0)
     {
@@ -2816,22 +2780,10 @@ void OpenSellPositions()
 
     if(trendLot > 0 && trade.Sell(trendLot, _Symbol, bid, sellStopLoss, 0, "Trend Sell"))
     {
-        for(int i = PositionsTotal() - 1; i >= 0; i--)
-        {
-            if(PositionSelectByTicket(PositionGetTicket(i)))
-            {
-                if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
-                   PositionGetInteger(POSITION_MAGIC) == g_ExpertMagic &&
-                   PositionGetString(POSITION_COMMENT) == "Trend Sell")
-                {
-                    trendSellTicket = PositionGetTicket(i);
-                    trendSellOpened = true;
-                    Print("Trend Sell Opened: #", trendSellTicket);
-                    if(ShowAlerts) Alert("Trend SELL Order Success for ", _Symbol, " - Ticket: #", trendSellTicket);
-                    break;
-                }
-            }
-        }
+        trendSellTicket = trade.ResultOrder();
+        trendSellOpened = true;
+        Print("Trend Sell Opened: #", trendSellTicket);
+        if(ShowAlerts) Alert("Trend SELL Order Success for ", _Symbol, " - Ticket: #", trendSellTicket);
     }
     else if(trendLot > 0)
     {
