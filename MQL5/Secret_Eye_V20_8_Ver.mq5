@@ -1471,7 +1471,7 @@ int OnInit()
                 PrintFormat("   Recommendation: Set AeronInstrumentName input (e.g., '6A' for AUDUSD futures)");
             }
             
-            g_AeronInstrument = g_AeronSymbol + " Futures";
+            g_AeronInstrument = g_AeronSymbol;
             PrintFormat("Aeron Instrument Name: %s", g_AeronInstrument);
             PrintFormat("Point-to-Tick Conversion: Enabled for %s", g_AeronSymbol);
             
