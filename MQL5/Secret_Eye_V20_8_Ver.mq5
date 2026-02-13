@@ -196,6 +196,7 @@ static bool         g_AeronUdpStarted = false;  // Track UDP publisher state
 static datetime     g_LastPublisherCleanup = 0; // Track last cleanup time
 
 // V20.1 - Daily Profit Protection Variables
+static double       DailyBaseEquity = 0;          // Account equity at session start
 static double       dailyMaxProfitBalance = 0;
 static bool         profitProtectionActive = false;
 static bool         stopTradingForProfitProtection = false;
@@ -1172,6 +1173,8 @@ int OnInit()
     {
         HandleError(OP_INIT, 0, "Failed to initialize daily loss protection", false);
     }
+    Print("Daily loss/profit protection initialized. Starting balance: $", DoubleToString(todayStartingBalance, 2), 
+          " | Base equity: $", DoubleToString(DailyBaseEquity, 2));
 
     if(ManualServerOffset == 0)
     {
@@ -3397,12 +3400,14 @@ bool CheckDailyLossLimit()
     if(shouldReset)
     {
         todayStartingBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+        DailyBaseEquity = AccountInfoDouble(ACCOUNT_EQUITY);  // Capture equity at session start
         if(stopTradingForDay) Print("Trading day reset at 18:00 EST. Daily loss limit has been reset.");
         Print("Daily loss limit reset at 18:00 EST. Starting balance: $", DoubleToString(todayStartingBalance, 2));
+        Print("Session opened. Base equity: $", DoubleToString(DailyBaseEquity, 2));
         stopTradingForDay = false;
         killSwitchExecuted = false;
         
-        dailyMaxProfitBalance = todayStartingBalance;
+        dailyMaxProfitBalance = DailyBaseEquity;  // Use equity instead of balance
         profitProtectionActive = false;
         stopTradingForProfitProtection = false;
         Print("Daily profit protection reset. Initial max profit balance: $", DoubleToString(dailyMaxProfitBalance, 2));
@@ -3472,13 +3477,15 @@ bool CheckDailyProfitProtection()
         return false;
     }
     
-    double currentProfitAmount = currentEquity - todayStartingBalance;
-   double currentProfitPercentage = 0.0;
+    // Calculate DailyProfit = CurrentEquity - DailyBaseEquity
+    double DailyProfit = currentEquity - DailyBaseEquity;
+    double currentProfitAmount = DailyProfit;  // Use DailyProfit for calculations
+    double currentProfitPercentage = 0.0;
     
-    if(todayStartingBalance > 0)
+    if(DailyBaseEquity > 0)
     {
         // Safe division for profit percentage
-        currentProfitPercentage = SafeDivide(currentProfitAmount * 100.0, todayStartingBalance, 0.0);
+        currentProfitPercentage = SafeDivide(currentProfitAmount * 100.0, DailyBaseEquity, 0.0);
     }
     
     if(!profitProtectionActive && currentProfitPercentage >= MAX_DAILY_LOSS_PERCENTAGE)
@@ -3487,9 +3494,9 @@ bool CheckDailyProfitProtection()
         dailyMaxProfitBalance = currentEquity;
         Print("=== PROFIT PROTECTION ACTIVATED ===");
         Print("Daily profit reached threshold: ", DoubleToString(currentProfitPercentage, 2), "% (≥", DoubleToString(MAX_DAILY_LOSS_PERCENTAGE, 1), "%)");
-        Print("Starting balance: $", DoubleToString(todayStartingBalance, 2));
+        Print("Base equity (session start): $", DoubleToString(DailyBaseEquity, 2));
         Print("Current equity: $", DoubleToString(currentEquity, 2));
-        Print("Profit amount: $", DoubleToString(currentProfitAmount, 2));
+        Print("Daily profit: $", DoubleToString(DailyProfit, 2));
         Print("Now monitoring for 50% profit drawdown from peak...");
         
         if(ShowAlerts)
@@ -3509,12 +3516,12 @@ bool CheckDailyProfitProtection()
             dailyMaxProfitBalance = currentEquity;
             
             double peakIncrease = dailyMaxProfitBalance - previousPeak;
-            double peakIncreasePercentage = (peakIncrease / todayStartingBalance) * 100.0;
+            double peakIncreasePercentage = (peakIncrease / DailyBaseEquity) * 100.0;
             
             if(peakIncrease >= 100.0 || peakIncreasePercentage >= 1.0)
             {
-                double totalProfitFromPeak = dailyMaxProfitBalance - todayStartingBalance;
-                double totalProfitPercentageFromPeak = (totalProfitFromPeak / todayStartingBalance) * 100.0;
+                double totalProfitFromPeak = dailyMaxProfitBalance - DailyBaseEquity;
+                double totalProfitPercentageFromPeak = (totalProfitFromPeak / DailyBaseEquity) * 100.0;
                 
                 Print("📈 NEW PROFIT PEAK: $", DoubleToString(dailyMaxProfitBalance, 2), 
                       " (", DoubleToString(totalProfitPercentageFromPeak, 2), "% total profit)");
@@ -3522,7 +3529,7 @@ bool CheckDailyProfitProtection()
         }
         
         double drawdownFromPeak = dailyMaxProfitBalance - currentEquity;
-        double maxProfitAmount = dailyMaxProfitBalance - todayStartingBalance;
+        double maxProfitAmount = dailyMaxProfitBalance - DailyBaseEquity;  // Use DailyBaseEquity for consistency
         double drawdownPercentage = 0.0;
         
         if(maxProfitAmount > 0)
@@ -3556,11 +3563,11 @@ bool CheckDailyProfitProtection()
             CloseAllBuyPositions();
             CloseAllSellPositions();
             
-            double protectedProfitAmount = currentEquity - todayStartingBalance;
-            double protectedProfitPercentage = (protectedProfitAmount / todayStartingBalance) * 100.0;
+            double protectedProfitAmount = currentEquity - DailyBaseEquity;  // Use DailyBaseEquity
+            double protectedProfitPercentage = (protectedProfitAmount / DailyBaseEquity) * 100.0;
             
             Print("=== PROFIT PROTECTION SUMMARY ===");
-            Print("Starting balance: $", DoubleToString(todayStartingBalance, 2));
+            Print("Base equity (session start): $", DoubleToString(DailyBaseEquity, 2));
             Print("Peak balance reached: $", DoubleToString(dailyMaxProfitBalance, 2));
             Print("Final protected equity: $", DoubleToString(currentEquity, 2));
             Print("Protected profit: $", DoubleToString(protectedProfitAmount, 2), " (", DoubleToString(protectedProfitPercentage, 2), "%)");
