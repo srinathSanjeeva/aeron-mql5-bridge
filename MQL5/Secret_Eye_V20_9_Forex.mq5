@@ -4,6 +4,15 @@
 //|                                             https://www.sanjeevas.com|
 //+------------------------------------------------------------------+
 
+// V20.9.1 HOTFIX - Trading Hours API Enforcement:
+// - CRITICAL FIX: Removed early return in IsTradingAllowed() when EnableKillSwitch=false
+// - Trading hours from API are now ALWAYS enforced regardless of kill switch setting
+// - Kill switch logic separated from trading hours validation
+// - Added hourly status logging showing API data source and trading hours compliance
+// - Fixed immediate entry logic to properly gate on IsTradingAllowed() before execution
+// - Prevents orders from being placed outside configured trading hours
+// - Matches V20.8 behavior where API hours are always respected
+//
 // V20.9 FOREX Edition - Signal Reversal for USD Base Pairs:
 // - Added SignalReversal input parameter to reverse published signals
 // - When enabled, long positions on USDCHF publish as short signals (for 6S_F futures)
@@ -56,8 +65,8 @@
 
 #property copyright "Copyright 2025, Sanjeevas Inc."
 #property link      "https://www.sanjeevas.com"
-#property version   "20.90"
-#property description "V20.9 FOREX - Signal Reversal for USD Base Pairs + Exception Handling"
+#property version   "20.91"
+#property description "V20.9.1 HOTFIX - Trading Hours API Always Enforced + Signal Reversal for USD Pairs"
 #include <Trade\Trade.mqh>
 #include "AeronBridge.mqh"
 #include "AeronPublisher.mqh"
@@ -643,19 +652,38 @@ void OnTick()
         return;  // Stop trading but keep EA running
     }
     
-    // V20.2 - Handle immediate entry
-    if(immediateEntryPending && !immediateEntryCompleted)
-    {
-        ExecuteImmediateTrade();
-        immediateEntryPending = false;
-        immediateEntryCompleted = true;
-        return;
-    }
-    
     // Regular trading logic from here
     if(!IsTradingAllowed())
     {
         CheckKillSwitchPostTimeRecovery();
+        return;
+    }
+    
+    // V20.2 - Handle immediate entry (AFTER trading hours check)
+    if(immediateEntryPending && !immediateEntryCompleted)
+    {
+        if(IsTradingAllowed() && IsInitialDelayOver() && !stopTradingForDay && !stopTradingForProfitProtection)
+        {
+            Print("=== EXECUTING PENDING IMMEDIATE ENTRY ===");
+            Print("Conditions met: Trading allowed + Initial delay over");
+            ExecuteImmediateTrade();
+            immediateEntryPending = false;
+            immediateEntryCompleted = true;
+        }
+        else
+        {
+            // Log why immediate entry is still waiting (but only occasionally to avoid spam)
+            static datetime lastImmediateEntryLog = 0;
+            if(TimeCurrent() - lastImmediateEntryLog > 30) // Log every 30 seconds
+            {
+                Print("=== IMMEDIATE ENTRY WAITING ===");
+                Print("Trading allowed: ", IsTradingAllowed() ? "YES" : "NO");
+                Print("Initial delay over: ", IsInitialDelayOver() ? "YES" : "NO");
+                Print("Stop trading for day: ", stopTradingForDay ? "YES" : "NO");
+                Print("Stop for profit protection: ", stopTradingForProfitProtection ? "YES" : "NO");
+                lastImmediateEntryLog = TimeCurrent();
+            }
+        }
         return;
     }
     
@@ -1814,8 +1842,6 @@ bool IsTradingAllowed()
     if(stopTradingForDay) return false;
     if(stopTradingForProfitProtection) return false;
     
-    if(!EnableKillSwitch) return true;
-    
     MqlDateTime time;
     TimeCurrent(time);
     
@@ -1825,6 +1851,18 @@ bool IsTradingAllowed()
     
     if(estHour < 0) estHour += 24;
     if(estHour >= 24) estHour -= 24;
+    
+    // Check if trading hours are impossible (>= 24 means no trading today)
+    if(currentStartHour >= 24 || currentEndHour >= 24)
+    {
+        static bool noTradingPrinted = false;
+        if(!noTradingPrinted)
+        {
+            Print("No trading scheduled for today (impossible hours configured)");
+            noTradingPrinted = true;
+        }
+        return false;
+    }
     
     bool isWithinTradingHours = false;
     
@@ -1843,39 +1881,61 @@ bool IsTradingAllowed()
         isWithinTradingHours = (estMin >= currentStartMinute && estMin < currentEndMinute);
     }
     
-    bool isPastEndTime = (estHour > currentEndHour) || (estHour == currentEndHour && estMin >= currentEndMinute);
-    
-    if(isPastEndTime && !killSwitchExecuted)
+    // Kill switch logic only executes if enabled
+    if(EnableKillSwitch)
     {
-        Print("=== KILL SWITCH TRIGGERED ===");
-        Print("Current EST Time: ", estHour, ":", StringFormat("%02d", estMin));
-        Print("End Time: ", currentEndHour, ":", StringFormat("%02d", currentEndMinute));
+        bool isPastEndTime = (estHour > currentEndHour) || (estHour == currentEndHour && estMin >= currentEndMinute);
         
-        bool hadPositions = false;
-        
-        if(scalpBuyOpened || trendBuyOpened)
+        if(isPastEndTime && !killSwitchExecuted)
         {
-            Print("Closing all buy positions due to kill switch...");
-            CloseAllBuyPositions();
-            hadPositions = true;
+            Print("=== KILL SWITCH TRIGGERED ===");
+            Print("Current EST Time: ", estHour, ":", StringFormat("%02d", estMin));
+            Print("End Time: ", currentEndHour, ":", StringFormat("%02d", currentEndMinute));
+            
+            bool hadPositions = false;
+            
+            if(scalpBuyOpened || trendBuyOpened)
+            {
+                Print("Closing all buy positions due to kill switch...");
+                CloseAllBuyPositions();
+                hadPositions = true;
+            }
+            
+            if(scalpSellOpened || trendSellOpened)
+            {
+                Print("Closing all sell positions due to kill switch...");
+                CloseAllSellPositions();
+                hadPositions = true;
+            }
+            
+            killSwitchExecuted = true;
+            stopTradingForDay = true;
+            
+            Print("Kill switch executed. Trading disabled for remainder of day.");
+            
+            if(ShowAlerts && hadPositions)
+            {
+                Alert("Kill Switch: All positions closed for ", _Symbol, " at ", estHour, ":", StringFormat("%02d", estMin), " EST");
+            }
         }
-        
-        if(scalpSellOpened || trendSellOpened)
-        {
-            Print("Closing all sell positions due to kill switch...");
-            CloseAllSellPositions();
-            hadPositions = true;
-        }
-        
-        killSwitchExecuted = true;
-        stopTradingForDay = true;
-        
-        Print("Kill switch executed. Trading disabled for remainder of day.");
-        
-        if(ShowAlerts && hadPositions)
-        {
-            Alert("Kill Switch: All positions closed for ", _Symbol, " at ", estHour, ":", StringFormat("%02d", estMin), " EST");
-        }
+    }
+    
+    // Log trading hours status periodically
+    static datetime lastPrintTime = 0;
+    datetime currentTime = TimeCurrent();
+    if(currentTime - lastPrintTime >= 3600)
+    {
+        string dstStatus = AutoDST ? (IsEasternDST(currentTime) ? "EDT" : "EST") : "Manual";
+        string dataSource = UseAPITradingHours && apiDataValid ? "API" : "Manual";
+        Print("=== TRADING HOURS STATUS ===");
+        Print("Data Source: ", dataSource, " | Symbol: ", UseAPITradingHours ? API_Symbol : "N/A");
+        Print("Server Time: ", time.hour, ":", StringFormat("%02d", time.min));
+        Print("Current Eastern Time (", dstStatus, "): ", estHour, ":", StringFormat("%02d", estMin));
+        Print("Trading Hours: ", StringFormat("%02d:%02d", currentStartHour, currentStartMinute), 
+              " - ", StringFormat("%02d:%02d", currentEndHour, currentEndMinute));
+        Print("Within Trading Hours: ", isWithinTradingHours ? "YES" : "NO");
+        Print("Kill Switch: ", EnableKillSwitch ? "ENABLED" : "DISABLED");
+        lastPrintTime = currentTime;
     }
     
     return isWithinTradingHours;
