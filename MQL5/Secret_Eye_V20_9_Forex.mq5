@@ -410,9 +410,13 @@ int OnInit()
                     currentStartHour, currentStartMinute, currentEndHour, currentEndMinute);
     }
     
-    // V20.1 - Initialize daily profit/loss tracking
-    todayStartingBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-    Print("Today's starting balance: ", todayStartingBalance);
+    // V20.1 - Initialize daily profit/loss tracking via CheckDailyLossLimit
+    // This ensures both loss protection AND profit protection are properly initialized
+    if(!CheckDailyLossLimit())
+    {
+        HandleError(OP_INIT, 0, "Failed to initialize daily loss/profit protection", false);
+    }
+    Print("Daily loss/profit protection initialized. Starting balance: $", DoubleToString(todayStartingBalance, 2));
     
     // V20.2 - Handle immediate entry on load
     if(ImmediateEntryOnLoad && !immediateEntryCompleted)
