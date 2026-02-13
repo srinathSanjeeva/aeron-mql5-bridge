@@ -3,6 +3,7 @@
 ## Configuration Quick Start
 
 ### Dual Session Setup (3 Steps)
+
 ```mql5
 // Step 1: Enable manual mode
 UseAPITradingHours = false
@@ -23,12 +24,14 @@ ManualKillMinute = 0       // Close positions at this minute
 ## Key Concepts
 
 ### Session End vs Kill Time
-| Control | Purpose | When It Activates |
-|---------|---------|-------------------|
-| **Session End Time** | Stops NEW orders | At end of each session |
-| **Kill Time** | Closes EXISTING positions | Once per day at specified time |
+
+| Control              | Purpose                   | When It Activates              |
+| -------------------- | ------------------------- | ------------------------------ |
+| **Session End Time** | Stops NEW orders          | At end of each session         |
+| **Kill Time**        | Closes EXISTING positions | Once per day at specified time |
 
 **Example:**
+
 - Session 1: 09:00-11:00 (stop new orders at 11:00)
 - Session 2: 14:00-16:00 (stop new orders at 16:00)
 - Kill Time: 17:00 (close all positions at 17:00)
@@ -39,6 +42,7 @@ ManualKillMinute = 0       // Close positions at this minute
 ## Input Parameters Summary
 
 ### Session 1 (Always Active in Manual Mode)
+
 ```
 ManualStartTime = 9         // Hour (0-23 EST)
 ManualStartMinute = 0       // Minute (0-59)
@@ -47,6 +51,7 @@ ManualEndMinute = 0         // Minute (0-59)
 ```
 
 ### Session 2 (Optional)
+
 ```
 ManualStartTime2 = 0        // Hour (0=disabled, 1-23=enabled)
 ManualStartMinute2 = 0      // Minute (0-59)
@@ -55,12 +60,14 @@ ManualEndMinute2 = 0        // Minute (0-59)
 ```
 
 ### Kill Time (Optional Override)
+
 ```
 ManualKillTime = 0          // Hour to close positions (0=use session end)
 ManualKillMinute = 0        // Minute to close positions
 ```
 
 ### Kill Switch Control
+
 ```
 EnableKillSwitch = true     // Must be true for automatic closure
 ```
@@ -70,6 +77,7 @@ EnableKillSwitch = true     // Must be true for automatic closure
 ## Common Configurations
 
 ### 1️⃣ Single Session (V20.8 Compatible)
+
 ```mql5
 ManualStartTime = 9
 ManualEndTime = 16
@@ -77,6 +85,7 @@ ManualStartTime2 = 0        // Disabled
 ManualKillTime = 0          // Use session 1 end
 EnableKillSwitch = true
 ```
+
 **Trading:** 9 AM - 4 PM  
 **Closure:** 4 PM  
 **Behavior:** Classic single session
@@ -84,6 +93,7 @@ EnableKillSwitch = true
 ---
 
 ### 2️⃣ Dual Session, Auto Close at Final Session
+
 ```mql5
 ManualStartTime = 3         // London
 ManualEndTime = 7
@@ -92,6 +102,7 @@ ManualEndTime2 = 16
 ManualKillTime = 0          // Use session 2 end (16:00)
 EnableKillSwitch = true
 ```
+
 **Trading:** 3-7 AM, 9 AM-4 PM  
 **Closure:** 4 PM (Session 2 end)  
 **Behavior:** Trade two sessions, close at end
@@ -99,6 +110,7 @@ EnableKillSwitch = true
 ---
 
 ### 3️⃣ Dual Session, Explicit Kill Time
+
 ```mql5
 ManualStartTime = 9
 ManualEndTime = 11
@@ -108,6 +120,7 @@ ManualKillTime = 17         // Override: 5 PM close
 ManualKillMinute = 0
 EnableKillSwitch = true
 ```
+
 **Trading:** 9-11 AM, 2-4 PM  
 **Closure:** 5 PM (explicit)  
 **Behavior:** Trade two sessions, hold positions until EOD
@@ -115,6 +128,7 @@ EnableKillSwitch = true
 ---
 
 ### 4️⃣ Morning Entries Only, EOD Close
+
 ```mql5
 ManualStartTime = 9
 ManualEndTime = 11
@@ -123,6 +137,7 @@ ManualKillTime = 16         // Close at 4 PM
 ManualKillMinute = 0
 EnableKillSwitch = true
 ```
+
 **Trading:** 9-11 AM only  
 **Closure:** 4 PM  
 **Behavior:** Take early entries, let them run
@@ -130,6 +145,7 @@ EnableKillSwitch = true
 ---
 
 ### 5️⃣ Overnight Asian + European
+
 ```mql5
 ManualStartTime = 19        // 7 PM EST (Asian)
 ManualEndTime = 2           // 2 AM EST (crosses midnight)
@@ -138,6 +154,7 @@ ManualEndTime2 = 11         // 11 AM EST
 ManualKillTime = 0          // Use session 2 end
 EnableKillSwitch = true
 ```
+
 **Trading:** 7 PM-2 AM, 3-11 AM  
 **Closure:** 11 AM (Session 2 end)  
 **Behavior:** Continuous overnight trading
@@ -147,6 +164,7 @@ EnableKillSwitch = true
 ## Validation Rules
 
 ### ✅ Valid Configurations
+
 - Session 1 only (ManualStartTime2 = 0)
 - Two sessions with time gap between them
 - Overnight sessions (end < start)
@@ -154,6 +172,7 @@ EnableKillSwitch = true
 - Kill time = 0 (uses session end)
 
 ### ❌ Invalid Configurations (EA Will Disable Session 2)
+
 - Sessions overlap in time
 - Session 2 start within session 1
 - Session 1 end within session 2
@@ -163,19 +182,20 @@ EnableKillSwitch = true
 
 ## Troubleshooting
 
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| "Session validation failed" | Sessions overlap | Adjust times to remove overlap |
-| Session 2 not trading | ManualStartTime2 = 0 | Set ManualStartTime2 > 0 |
-| No kill switch activation | EnableKillSwitch = false | Set to true |
-| Positions not closing | Wrong kill time | Check OnInit() logs for effective kill time |
-| "Only available in manual mode" | UseAPITradingHours = true | Set to false |
+| Issue                           | Cause                     | Solution                                    |
+| ------------------------------- | ------------------------- | ------------------------------------------- |
+| "Session validation failed"     | Sessions overlap          | Adjust times to remove overlap              |
+| Session 2 not trading           | ManualStartTime2 = 0      | Set ManualStartTime2 > 0                    |
+| No kill switch activation       | EnableKillSwitch = false  | Set to true                                 |
+| Positions not closing           | Wrong kill time           | Check OnInit() logs for effective kill time |
+| "Only available in manual mode" | UseAPITradingHours = true | Set to false                                |
 
 ---
 
 ## Log Messages to Check
 
 ### At Startup
+
 ```
 === TRADING HOURS CONFIGURATION (MANUAL MODE) ===
 Current Trading Window: 09:00 to 16:00
@@ -190,6 +210,7 @@ Positions will close at this time regardless of session end times
 ```
 
 ### During Trading
+
 ```
 === KILL SWITCH ACTIVATED ===
 Closing positions at explicit kill time: 17:00 EST/EDT
@@ -201,21 +222,22 @@ Kill switch executed successfully. Positions closed.
 
 ## Feature Matrix
 
-| Feature | Single Session | Dual Session | Explicit Kill Time |
-|---------|----------------|--------------|-------------------|
-| Trade in session 1 | ✅ | ✅ | ✅ |
-| Trade in session 2 | ❌ | ✅ | ✅ |
-| Auto close at session 1 end | ✅ (if no S2) | ❌ | ❌ |
-| Auto close at session 2 end | ❌ | ✅ (default) | ❌ |
-| Close at custom time | ❌ | ❌ | ✅ |
-| Hold positions across gap | ❌ | ✅ (if kill time later) | ✅ |
-| Backward compatible | ✅ | ✅ | ✅ |
+| Feature                     | Single Session | Dual Session            | Explicit Kill Time |
+| --------------------------- | -------------- | ----------------------- | ------------------ |
+| Trade in session 1          | ✅             | ✅                      | ✅                 |
+| Trade in session 2          | ❌             | ✅                      | ✅                 |
+| Auto close at session 1 end | ✅ (if no S2)  | ❌                      | ❌                 |
+| Auto close at session 2 end | ❌             | ✅ (default)            | ❌                 |
+| Close at custom time        | ❌             | ❌                      | ✅                 |
+| Hold positions across gap   | ❌             | ✅ (if kill time later) | ✅                 |
+| Backward compatible         | ✅             | ✅                      | ✅                 |
 
 ---
 
 ## Testing Checklist
 
 ### Before Live
+
 - [ ] Review session times in logs
 - [ ] Confirm "Dual session mode enabled" (if using)
 - [ ] Check kill switch time configuration
@@ -223,6 +245,7 @@ Kill switch executed successfully. Positions closed.
 - [ ] Verify no overlap warnings
 
 ### During Testing
+
 - [ ] Positions open in session 1 ✓
 - [ ] No positions during gap ✓
 - [ ] Positions open in session 2 ✓
@@ -233,15 +256,18 @@ Kill switch executed successfully. Positions closed.
 ## Need More Help?
 
 📄 **Detailed Docs:**
+
 - `V20_9_IMPLEMENTATION_GUIDE.md` - Technical details
 - `V20_9_RELEASE_SUMMARY.md` - Feature overview
 
 🔍 **Check Logs:**
+
 - OnInit() section shows all configuration
 - Look for validation messages
 - Review kill switch activation logs
 
 ⚠️ **Common Mistakes:**
+
 - Forgot to set `UseAPITradingHours = false`
 - Sessions overlap (auto-disabled)
 - `EnableKillSwitch = false` (no closure)
