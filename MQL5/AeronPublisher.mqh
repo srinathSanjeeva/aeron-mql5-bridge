@@ -38,7 +38,8 @@ enum AeronStrategyAction
    AERON_SHORT_EXIT     = 6,
    AERON_LONG_STOPLOSS  = 7,
    AERON_SHORT_STOPLOSS = 8,
-   AERON_PROFIT_TARGET  = 9
+   AERON_PROFIT_TARGET  = 9,
+   AERON_FORCE_EXIT     = 10  // Close all positions (reverse signal after hours)
 };
 
 //+------------------------------------------------------------------+

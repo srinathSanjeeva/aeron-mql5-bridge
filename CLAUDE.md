@@ -12,24 +12,25 @@ MT5 Strategy → MQL5 Publisher → C++ DLL → Aeron (IPC/UDP) → Subscribers
 ```
 
 Three layers:
+
 1. **C++ DLL** (`AeronBridge.cpp/.h`) — Aeron C client wrapper, binary protocol encoding/decoding, symbol mapping
 2. **MQL5 Library Layer** (`AeronBridge.mqh`, `AeronPublisher.mqh`, `BrokerMappings.mqh`) — DLL imports, signal encoding, broker symbol mapping
 3. **Expert Advisors** (`AeronBridgeInt.mq5`, `Secret_Eye_V20_*.mq5`) — Trading strategies and signal subscriber
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `AeronBridge.cpp` | C++ DLL — Aeron pub/sub, symbol mapping, tick conversion |
-| `AeronBridge.h` | DLL API declarations (exported functions) |
-| `AeronBridge.mqh` | MQL5 DLL import declarations |
-| `AeronPublisher.mqh` | Binary signal encoding (104-byte protocol) |
-| `BrokerMappings.mqh` | Multi-broker symbol mapping profiles |
-| `AeronBridgeInt.mq5` | Signal subscriber EA (receives & executes trades) |
-| `MQL5/Secret_Eye_V20_9_Complete.mq5` | Full trading strategy (latest version, 4200+ lines) |
-| `MQL5/Secret_Eye_V20_9_Forex.mq5` | Forex edition with signal reversal |
-| `broker_a_mappings.csv` | Audacity Capital symbol mappings |
-| `broker_b_mappings.csv` | Alternate broker symbol mappings |
+| File                                 | Purpose                                                  |
+| ------------------------------------ | -------------------------------------------------------- |
+| `AeronBridge.cpp`                    | C++ DLL — Aeron pub/sub, symbol mapping, tick conversion |
+| `AeronBridge.h`                      | DLL API declarations (exported functions)                |
+| `AeronBridge.mqh`                    | MQL5 DLL import declarations                             |
+| `AeronPublisher.mqh`                 | Binary signal encoding (104-byte protocol)               |
+| `BrokerMappings.mqh`                 | Multi-broker symbol mapping profiles                     |
+| `AeronBridgeInt.mq5`                 | Signal subscriber EA (receives & executes trades)        |
+| `MQL5/Secret_Eye_V20_9_Complete.mq5` | Full trading strategy (latest version, 4200+ lines)      |
+| `MQL5/Secret_Eye_V20_9_Forex.mq5`    | Forex edition with signal reversal                       |
+| `broker_a_mappings.csv`              | Audacity Capital symbol mappings                         |
+| `broker_b_mappings.csv`              | Alternate broker symbol mappings                         |
 
 ## Binary Protocol (104 bytes, little-endian)
 
@@ -37,7 +38,7 @@ Three layers:
 Offset  Size  Field
 0       4     Magic (0xA330BEEF)
 4       2     Version (1)
-6       2     Action (1-9)
+6       2     Action (1-10)
 8       8     Timestamp (nanoseconds)
 16      4     Long SL (ticks)
 20      4     Short SL (ticks)
@@ -50,7 +51,7 @@ Offset  Size  Field
 100     4     Padding
 ```
 
-Action codes: 1=LongEntry(SL), 2=LongEntry(SL+TP), 3=ShortEntry(SL), 4=ShortEntry(SL+TP), 5=LongExit, 6=ShortExit, 7=LongSL, 8=ShortSL, 9=ProfitTarget
+Action codes: 1=LongEntry(SL), 2=LongEntry(SL+TP), 3=ShortEntry(SL), 4=ShortEntry(SL+TP), 5=LongExit, 6=ShortExit, 7=LongSL, 8=ShortSL, 9=ProfitTarget, 10=ForceExit
 
 ## Build System
 
@@ -63,6 +64,7 @@ Action codes: 1=LongEntry(SL), 2=LongEntry(SL+TP), 3=ShortEntry(SL), 4=ShortEntr
 - **Build guide**: See `BUILD_WINDOWS_VS_AERON_BRIDGE.md`
 
 ### Build steps
+
 1. Build Aeron C client from source (CMake)
 2. Open `AeronBridge.sln` in Visual Studio
 3. Build Release x64
@@ -71,6 +73,7 @@ Action codes: 1=LongEntry(SL), 2=LongEntry(SL+TP), 3=ShortEntry(SL), 4=ShortEntr
 ## Broker-Specific Deployments
 
 Compiled DLLs are deployed per broker in subdirectories:
+
 - `Audacity/` — Audacity Capital prop firm
 - `Darwinex/` — Darwinex broker
 - `forex.com/` — Forex.com broker
@@ -92,6 +95,7 @@ Configured via: broker profiles in `BrokerMappings.mqh`, CSV files, or `AeronBri
 ## Strategy Versions (Secret Eye)
 
 Active development line — each version adds features:
+
 - **V20.5**: Aeron binary publisher
 - **V20.6**: Full integration
 - **V20.7**: Futures tick conversion + exception handling

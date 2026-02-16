@@ -76,7 +76,7 @@ enum ENUM_MESSAGE_FORMAT
 {
     MSG_NEW_ONLY,    // New Format Only
     MSG_LEGACY_ONLY, // Legacy Format Only
-    MSG_BOTH         // Both Formats (default)
+   MSG_BOTH         // Both Formats (default)
 };
 
 //--- Account Mode Enum
@@ -655,6 +655,73 @@ void OnTick()
     // Regular trading logic from here
     if(!IsTradingAllowed())
     {
+        // V20.9.2 - Check for reverse signals after hours (when EnableKillSwitch is active)
+        if(EnableKillSwitch)
+        {
+            // Read stochastic to detect potential reverse signals
+            double mainLine[3], signalLine[3];
+            if(SafeCopyBuffer(stochHandle, 0, 1, 3, mainLine, OP_INDICATOR) &&
+               SafeCopyBuffer(stochHandle, 1, 1, 3, signalLine, OP_INDICATOR))
+            {
+                double k0 = mainLine[0], d0 = signalLine[0];
+                double k1 = mainLine[1], d1 = signalLine[1];
+                
+                bool buyCondition = (k0 < d0) && (k1 > d1);   // Bullish crossover
+                bool sellCondition = (k0 > d0) && (k1 < d1);  // Bearish crossover
+                
+                bool reverseDetected = false;
+                
+                // Reverse case 1: Buy signal while holding sell positions
+                if(buyCondition && (scalpSellOpened || trendSellOpened))
+                {
+                    Print("=== FORCE EXIT: Buy signal detected while holding SELL positions (after hours) ===");
+                    Print("EnableKillSwitch: ", EnableKillSwitch, " | Scalp Sell: ", scalpSellOpened, " | Trend Sell: ", trendSellOpened);
+                    
+                    // STEP 1: Close local positions first (publisher protection)
+                    CloseAllSellPositions();
+                    reverseDetected = true;
+                }
+                // Reverse case 2: Sell signal while holding buy positions
+                else if(sellCondition && (scalpBuyOpened || trendBuyOpened))
+                {
+                    Print("=== FORCE EXIT: Sell signal detected while holding BUY positions (after hours) ===");
+                    Print("EnableKillSwitch: ", EnableKillSwitch, " | Scalp Buy: ", scalpBuyOpened, " | Trend Buy: ", trendBuyOpened);
+                    
+                    // STEP 1: Close local positions first (publisher protection)
+                    CloseAllBuyPositions();
+                    reverseDetected = true;
+                }
+                
+                // STEP 2: Broadcast FORCE_EXIT to subscribers (after closing local positions)
+                if(reverseDetected && AeronPublishMode != AERON_PUBLISH_NONE)
+                {
+                    Print("Broadcasting FORCE_EXIT signal to subscribers...");
+                    
+                    bool published = AeronPublishSignalDual(
+                        g_AeronSymbol,
+                        g_AeronInstrument,
+                        AERON_FORCE_EXIT,
+                        0,  // longSL (not applicable for force exit)
+                        0,  // shortSL (not applicable for force exit)
+                        0,  // profitTarget (not applicable)
+                        0,  // qty (not applicable)
+                        100.0,  // confidence (high certainty for force exit)
+                        AeronSourceTag,
+                        AeronPublishMode
+                    );
+                    
+                    if(published)
+                    {
+                        PrintFormat("[AERON_PUB] ✅ FORCE_EXIT: %s signal sent to all subscribers", g_AeronSymbol);
+                    }
+                    else
+                    {
+                        Print("[AERON_PUB] ⚠️ WARNING: Failed to publish FORCE_EXIT signal (positions already closed locally)");
+                    }
+                }
+            }
+        }
+        
         CheckKillSwitchPostTimeRecovery();
         return;
     }
@@ -706,11 +773,11 @@ void OnTick()
         return;
     }
 
-    double k0 = mainLine[0], d0 = signalLine[0];
-    double k1 = mainLine[1], d1 = signalLine[1];
+    double k0 = mainLine[0], d0 = signalLine[0];     // Older bar
+    double k1 = mainLine[1], d1 = signalLine[1];     // Newer bar (most recently closed)
 
-    bool buyCondition = (k1 < d1) && (k0 > d0);
-    bool sellCondition = (k1 > d1) && (k0 < d0);
+    bool buyCondition = (k0 < d0) && (k1 > d1);      // Bullish crossover: main crosses UP through signal
+    bool sellCondition = (k0 > d0) && (k1 < d1);     // Bearish crossover: main crosses DOWN through signal
 
     if(buyCondition && !scalpBuyOpened && !trendBuyOpened)
     {
