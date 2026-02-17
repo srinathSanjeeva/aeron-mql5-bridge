@@ -592,3 +592,24 @@ bool IsTradingAllowed()
         session2Enabled = false; \
     }
 
+//+------------------------------------------------------------------+
+//| Minimal EA lifecycle handlers                                    |
+//| This file is a partial/template variant used for version notes.  |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    Print("Secret_Eye_V20_9_Ver.mq5 loaded (template variant).");
+    Print("Use Secret_Eye_V20_9_Complete.mq5 for full trading logic.");
+    return INIT_SUCCEEDED;
+}
+
+void OnTick()
+{
+    // Intentionally minimal in template variant.
+}
+
+void OnDeinit(const int reason)
+{
+    Print("Secret_Eye_V20_9_Ver.mq5 unloaded. reason=", reason);
+}
+
