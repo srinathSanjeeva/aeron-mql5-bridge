@@ -15,6 +15,7 @@
 #include <thread>
 #include <unordered_map>
 #include <queue>
+#include <vector>
 
 // ===============================
 // Protocol (must match publisher)
@@ -80,18 +81,83 @@ static double g_defaultPointSize = 0.01;
 // Publisher (Aeron Producer) Globals
 // ===============================
 // Dual publisher support for IPC and UDP
-static aeron_async_add_publication_t* g_asyncPubIpc = nullptr;
-static aeron_publication_t* g_publicationIpc = nullptr;
 static std::atomic<int> g_pubIpcStarted{ 0 };
 
-static aeron_async_add_publication_t* g_asyncPubUdp = nullptr;
-static aeron_publication_t* g_publicationUdp = nullptr;
 static std::atomic<int> g_pubUdpStarted{ 0 };
+
+struct PublisherEndpoint
+{
+    std::string channel;
+    int streamId;
+    aeron_publication_t* publication;
+};
+
+static std::mutex g_pubMux;
+static std::vector<PublisherEndpoint> g_ipcPublications;
+static std::vector<PublisherEndpoint> g_udpPublications;
+
+// Forward declarations for helpers used by publisher functions
+static void setError(const std::string& s);
+static void setErrorFromAeron(const char* prefix);
 
 // Legacy single publisher (kept for backward compatibility)
 static aeron_async_add_publication_t* g_asyncPub = nullptr;
 static aeron_publication_t* g_publication = nullptr;
 static std::atomic<int> g_pubStarted{ 0 };
+
+static bool isPublicationRegistered(
+    const std::vector<PublisherEndpoint>& publications,
+    const std::string& channel,
+    int streamId)
+{
+    for (const auto& endpoint : publications)
+    {
+        if (endpoint.streamId == streamId && endpoint.channel == channel)
+            return true;
+    }
+    return false;
+}
+
+static int offerToPublication(
+    aeron_publication_t* publication,
+    const uint8_t* buffer,
+    size_t bufferLen,
+    const char* prefix)
+{
+    int64_t result = aeron_publication_offer(
+        publication,
+        buffer,
+        bufferLen,
+        nullptr,
+        nullptr);
+
+    if (result >= 0)
+        return 1;
+
+    std::string ctx = prefix ? std::string(prefix) : std::string("Publication");
+    if (result == AERON_PUBLICATION_NOT_CONNECTED)
+    {
+        setError(ctx + " not connected");
+    }
+    else if (result == AERON_PUBLICATION_BACK_PRESSURED)
+    {
+        setError(ctx + " back pressured");
+    }
+    else if (result == AERON_PUBLICATION_ADMIN_ACTION)
+    {
+        setError(ctx + " admin action");
+    }
+    else if (result == AERON_PUBLICATION_CLOSED)
+    {
+        setError(ctx + " closed");
+    }
+    else
+    {
+        setErrorFromAeron((ctx + " offer failed").c_str());
+    }
+
+    return 0;
+}
 
 // ===============================
 // Helpers
@@ -212,7 +278,6 @@ static int ticksToMt5Points(int ticks, const InstMap& m)
 static void ensureDefaultMap()
 {
     std::lock_guard<std::mutex> lock(g_mapMutex);
-    if (!g_map.empty()) return;
 
     // ==================================================================================
     // BROKER-SPECIFIC MAPPINGS: Audacity Capital
@@ -221,11 +286,11 @@ static void ensureDefaultMap()
     // futTickSize: NinjaTrader tick value (price movement per tick)
     // mt5PointSize: MT5 broker's _Point value (minimum price change)
     //
-	// - Audacity symbols conversion : ES → SPX500, NQ → TECH100, YM → DJ30, MBT → BTCUSD
+    // - Audacity symbols conversion : ES → SPX500, NQ → TECH100, YM → DJ30, MBT → BTCUSD
     // - g_map["ES"] = InstMap{ "SPX500", 0.25, 0.1 };
     // - g_map["NQ"] = InstMap{ "TECH100", 0.25, 0.1 };
     // - g_map["YM"] = InstMap{ "DJ30", 1.0, 0.1 };
-    // - g_map["MBT"] = InstMap{ "BTCUSD", 0.5, 0.01 };
+    // - g_map["MBT"] = InstMap{ "BTCUSD", 5.0, 0.01 };
     
 	// - Darwinex symbols conversion  : ES → SP500, NQ → NDX, YM → WS30
     // - g_map["ES"] = InstMap{ "SP500", 0.25, 0.1 };
@@ -236,23 +301,27 @@ static void ensureDefaultMap()
     // ES (E-mini S&P 500):
     //   - NT: 0.25 per tick | MT5 Symbol: SPX500 | MT5 _Point: 0.1
     //   - Example: 50 ticks → (50 × 0.25) ÷ 0.1 = 125 MT5 points = 12.5 price units
-    g_map["ES"] = InstMap{ "SPX500", 0.25, 0.1 };
+    if (g_map.find("ES") == g_map.end())
+        g_map["ES"] = InstMap{ "SP500", 0.25, 0.1 };
     
     // NQ (E-mini Nasdaq-100):
     //   - NT: 0.25 per tick | MT5 Symbol: TECH100 | MT5 _Point: 0.1
     //   - Example: 85 ticks → (85 × 0.25) ÷ 0.1 = 212.5 MT5 points = 21.25 price units
     //   - Desired: 85 ticks → 25.0 price units (adjusted futTickSize to match)
-    g_map["NQ"] = InstMap{ "TECH100", 0.25, 0.1 };
+    if (g_map.find("NQ") == g_map.end())
+        g_map["NQ"] = InstMap{ "NDX", 0.25, 0.1 };
     
     // YM (E-mini Dow):
     //   - NT: 1.0 per tick | MT5 Symbol: DJ30 | MT5 _Point: 0.01
     //   - Example: 50 ticks → (50 × 1.0) ÷ 0.01 = 5000 MT5 points = 50.0 price units
-    g_map["YM"] = InstMap{ "DJ30", 1.0, 0.1 };
+    if (g_map.find("YM") == g_map.end())
+        g_map["YM"] = InstMap{ "WS30", 1.0, 0.1 };
 
     // MBT (Micro Bitcoin):
-    //   - NT: 0.5 per tick | MT5 Symbol: BTCUSD | MT5 _Point: 0.01
-    //   - Example: 20 ticks → (20 × 0.5) ÷ 0.01 = 1000 MT5 points = 10.0 price units
-    g_map["MBT"] = InstMap{ "BTCUSD", 0.5, 0.01 };
+    //   - NT: 5.0 per tick | MT5 Symbol: BTCUSD | MT5 _Point: 0.01
+    //   - Example: 20 ticks → (20 × 5.0) ÷ 0.01 = 10000 MT5 points = 100.0 price units
+    if (g_map.find("MBT") == g_map.end())
+        g_map["MBT"] = InstMap{ "BTCUSD", 5.0, 0.01 };
 }
 
 // ===============================
@@ -738,8 +807,6 @@ int AeronBridge_StartPublisherIpcW(
     int streamId,
     int timeoutMs)
 {
-    if (g_pubIpcStarted.load()) return 1;
-
     const std::string aeronDir = wide_to_utf8(aeronDirW);
     const std::string channel = wide_to_utf8(channelW);
 
@@ -754,6 +821,12 @@ int AeronBridge_StartPublisherIpcW(
         return 0;
     }
     if (timeoutMs <= 0) timeoutMs = 3000;
+
+    {
+        std::lock_guard<std::mutex> lock(g_pubMux);
+        if (isPublicationRegistered(g_ipcPublications, channel, streamId))
+            return 1;
+    }
 
     // Initialize Aeron context if not already done
     if (!g_aeron)
@@ -782,9 +855,12 @@ int AeronBridge_StartPublisherIpcW(
         }
     }
 
+    aeron_async_add_publication_t* asyncPub = nullptr;
+    aeron_publication_t* publication = nullptr;
+
     // Add publication async
     if (aeron_async_add_publication(
-        &g_asyncPubIpc,
+        &asyncPub,
         g_aeron,
         channel.c_str(),
         streamId) < 0)
@@ -800,11 +876,10 @@ int AeronBridge_StartPublisherIpcW(
     int pollRes = 0;
     while (true)
     {
-        pollRes = aeron_async_add_publication_poll(&g_publicationIpc, g_asyncPubIpc);
+        pollRes = aeron_async_add_publication_poll(&publication, asyncPub);
         if (pollRes < 0)
         {
             setErrorFromAeron("aeron_async_add_publication_poll failed (IPC)");
-            g_asyncPubIpc = nullptr;
             return 0;
         }
         if (pollRes > 0)
@@ -815,11 +890,18 @@ int AeronBridge_StartPublisherIpcW(
         if (std::chrono::steady_clock::now() >= deadline)
         {
             setError("IPC Publication timeout: MediaDriver down or channel issue");
-            g_asyncPubIpc = nullptr;
             return 0;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_pubMux);
+        if (!isPublicationRegistered(g_ipcPublications, channel, streamId))
+        {
+            g_ipcPublications.push_back(PublisherEndpoint{ channel, streamId, publication });
+        }
     }
 
     g_pubIpcStarted.store(1);
@@ -832,8 +914,6 @@ int AeronBridge_StartPublisherUdpW(
     int streamId,
     int timeoutMs)
 {
-    if (g_pubUdpStarted.load()) return 1;
-
     const std::string aeronDir = wide_to_utf8(aeronDirW);
     const std::string channel = wide_to_utf8(channelW);
 
@@ -848,6 +928,12 @@ int AeronBridge_StartPublisherUdpW(
         return 0;
     }
     if (timeoutMs <= 0) timeoutMs = 3000;
+
+    {
+        std::lock_guard<std::mutex> lock(g_pubMux);
+        if (isPublicationRegistered(g_udpPublications, channel, streamId))
+            return 1;
+    }
 
     // Initialize Aeron context if not already done
     if (!g_aeron)
@@ -876,9 +962,12 @@ int AeronBridge_StartPublisherUdpW(
         }
     }
 
+    aeron_async_add_publication_t* asyncPub = nullptr;
+    aeron_publication_t* publication = nullptr;
+
     // Add publication async
     if (aeron_async_add_publication(
-        &g_asyncPubUdp,
+        &asyncPub,
         g_aeron,
         channel.c_str(),
         streamId) < 0)
@@ -894,11 +983,10 @@ int AeronBridge_StartPublisherUdpW(
     int pollRes = 0;
     while (true)
     {
-        pollRes = aeron_async_add_publication_poll(&g_publicationUdp, g_asyncPubUdp);
+        pollRes = aeron_async_add_publication_poll(&publication, asyncPub);
         if (pollRes < 0)
         {
             setErrorFromAeron("aeron_async_add_publication_poll failed (UDP)");
-            g_asyncPubUdp = nullptr;
             return 0;
         }
         if (pollRes > 0)
@@ -909,11 +997,18 @@ int AeronBridge_StartPublisherUdpW(
         if (std::chrono::steady_clock::now() >= deadline)
         {
             setError("UDP Publication timeout: MediaDriver down or channel issue");
-            g_asyncPubUdp = nullptr;
             return 0;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_pubMux);
+        if (!isPublicationRegistered(g_udpPublications, channel, streamId))
+        {
+            g_udpPublications.push_back(PublisherEndpoint{ channel, streamId, publication });
+        }
     }
 
     g_pubUdpStarted.store(1);
@@ -922,48 +1017,29 @@ int AeronBridge_StartPublisherUdpW(
 
 int AeronBridge_PublishBinaryIpc(const unsigned char* buffer, int bufferLen)
 {
-    if (!g_publicationIpc)
-    {
-        setError("IPC Publication not initialized");
-        return 0;
-    }
-
     if (!buffer || bufferLen != FRAME_SIZE)
     {
         setError("PublishBinaryIpc: buffer must be exactly 104 bytes");
         return 0;
     }
 
-    int64_t result = aeron_publication_offer(
-        g_publicationIpc,
-        (const uint8_t*)buffer,
-        (size_t)bufferLen,
-        nullptr,
-        nullptr);
-
-    if (result < 0)
+    std::vector<PublisherEndpoint> endpoints;
     {
-        if (result == AERON_PUBLICATION_NOT_CONNECTED)
-        {
-            setError("IPC Publication not connected");
-        }
-        else if (result == AERON_PUBLICATION_BACK_PRESSURED)
-        {
-            setError("IPC Publication back pressured");
-        }
-        else if (result == AERON_PUBLICATION_ADMIN_ACTION)
-        {
-            setError("IPC Publication admin action");
-        }
-        else if (result == AERON_PUBLICATION_CLOSED)
-        {
-            setError("IPC Publication closed");
-        }
-        else
-        {
-            setErrorFromAeron("aeron_publication_offer failed (IPC)");
-        }
+        std::lock_guard<std::mutex> lock(g_pubMux);
+        endpoints = g_ipcPublications;
+    }
+
+    if (endpoints.empty())
+    {
+        setError("IPC Publication not initialized");
         return 0;
+    }
+
+    for (const auto& endpoint : endpoints)
+    {
+        std::string ctx = "IPC Publication streamId=" + std::to_string(endpoint.streamId);
+        if (!offerToPublication(endpoint.publication, (const uint8_t*)buffer, (size_t)bufferLen, ctx.c_str()))
+            return 0;
     }
 
     return 1;
@@ -971,48 +1047,29 @@ int AeronBridge_PublishBinaryIpc(const unsigned char* buffer, int bufferLen)
 
 int AeronBridge_PublishBinaryUdp(const unsigned char* buffer, int bufferLen)
 {
-    if (!g_publicationUdp)
-    {
-        setError("UDP Publication not initialized");
-        return 0;
-    }
-
     if (!buffer || bufferLen != FRAME_SIZE)
     {
         setError("PublishBinaryUdp: buffer must be exactly 104 bytes");
         return 0;
     }
 
-    int64_t result = aeron_publication_offer(
-        g_publicationUdp,
-        (const uint8_t*)buffer,
-        (size_t)bufferLen,
-        nullptr,
-        nullptr);
-
-    if (result < 0)
+    std::vector<PublisherEndpoint> endpoints;
     {
-        if (result == AERON_PUBLICATION_NOT_CONNECTED)
-        {
-            setError("UDP Publication not connected");
-        }
-        else if (result == AERON_PUBLICATION_BACK_PRESSURED)
-        {
-            setError("UDP Publication back pressured");
-        }
-        else if (result == AERON_PUBLICATION_ADMIN_ACTION)
-        {
-            setError("UDP Publication admin action");
-        }
-        else if (result == AERON_PUBLICATION_CLOSED)
-        {
-            setError("UDP Publication closed");
-        }
-        else
-        {
-            setErrorFromAeron("aeron_publication_offer failed (UDP)");
-        }
+        std::lock_guard<std::mutex> lock(g_pubMux);
+        endpoints = g_udpPublications;
+    }
+
+    if (endpoints.empty())
+    {
+        setError("UDP Publication not initialized");
         return 0;
+    }
+
+    for (const auto& endpoint : endpoints)
+    {
+        std::string ctx = "UDP Publication streamId=" + std::to_string(endpoint.streamId);
+        if (!offerToPublication(endpoint.publication, (const uint8_t*)buffer, (size_t)bufferLen, ctx.c_str()))
+            return 0;
     }
 
     return 1;
@@ -1021,8 +1078,16 @@ int AeronBridge_PublishBinaryUdp(const unsigned char* buffer, int bufferLen)
 // Helper: clean up shared Aeron context when nothing is using it
 static void cleanupAeronContextIfIdle()
 {
+    bool hasIpcPublications = false;
+    bool hasUdpPublications = false;
+    {
+        std::lock_guard<std::mutex> lock(g_pubMux);
+        hasIpcPublications = !g_ipcPublications.empty();
+        hasUdpPublications = !g_udpPublications.empty();
+    }
+
     // Don't close if any publisher or subscriber is still active
-    if (g_publicationIpc || g_publicationUdp || g_publication || g_subscription)
+    if (hasIpcPublications || hasUdpPublications || g_publication || g_subscription)
         return;
 
     if (g_aeron)
@@ -1040,12 +1105,16 @@ static void cleanupAeronContextIfIdle()
 
 void AeronBridge_StopPublisherIpc()
 {
-    if (g_publicationIpc)
     {
-        aeron_publication_close(g_publicationIpc, nullptr, nullptr);
-        g_publicationIpc = nullptr;
+        std::lock_guard<std::mutex> lock(g_pubMux);
+        for (auto& endpoint : g_ipcPublications)
+        {
+            if (endpoint.publication)
+                aeron_publication_close(endpoint.publication, nullptr, nullptr);
+        }
+        g_ipcPublications.clear();
     }
-    g_asyncPubIpc = nullptr;
+
     g_pubIpcStarted.store(0);
 
     cleanupAeronContextIfIdle();
@@ -1053,12 +1122,16 @@ void AeronBridge_StopPublisherIpc()
 
 void AeronBridge_StopPublisherUdp()
 {
-    if (g_publicationUdp)
     {
-        aeron_publication_close(g_publicationUdp, nullptr, nullptr);
-        g_publicationUdp = nullptr;
+        std::lock_guard<std::mutex> lock(g_pubMux);
+        for (auto& endpoint : g_udpPublications)
+        {
+            if (endpoint.publication)
+                aeron_publication_close(endpoint.publication, nullptr, nullptr);
+        }
+        g_udpPublications.clear();
     }
-    g_asyncPubUdp = nullptr;
+
     g_pubUdpStarted.store(0);
 
     cleanupAeronContextIfIdle();

@@ -333,6 +333,10 @@ string GetDayOfWeekString(int dayOfWeek);
 bool ParseTimeString(string timeStr, int &hour, int &minute);
 ENUM_ACCOUNT_MODE DetectAccountMarginMode();
 int CountPositionsByTypeAndSymbol(ENUM_POSITION_TYPE posType);
+bool ValidateInputVolumes();
+bool ValidateSingleVolume(double volume, double minVolume, double maxVolume, double stepVolume, string label, string &errorOut);
+bool CanCallAeronDll(bool requireConnected = true);
+bool CanPublishAeronSignals();
 int ConvertPointsToFuturesTicks(int points, string futuresSymbol);  // V20.7 - Tick conversion
 void CleanupAeronPublishersForce();  // V20.8.3 - Force publisher cleanup for restart fix
 bool ValidateSessionsNonOverlapping();  // V20.9 - Session validation
@@ -394,6 +398,118 @@ int CountPositionsByTypeAndSymbol(ENUM_POSITION_TYPE posType)
     }
     
     return count;
+}
+
+bool ValidateSingleVolume(double volume, double minVolume, double maxVolume, double stepVolume, string label, string &errorOut)
+{
+    if(volume <= 0.0)
+    {
+        errorOut = StringFormat("%s volume must be > 0 (got %.8f)", label, volume);
+        return false;
+    }
+
+    if(volume < (minVolume - 0.0000001) || volume > (maxVolume + 0.0000001))
+    {
+        errorOut = StringFormat("%s volume %.8f out of broker range [%.8f, %.8f]", label, volume, minVolume, maxVolume);
+        return false;
+    }
+
+    if(stepVolume > 0.0)
+    {
+        double steps = (volume - minVolume) / stepVolume;
+        double aligned = minVolume + MathRound(steps) * stepVolume;
+        double tolerance = MathMax(0.0000001, stepVolume * 0.001);
+        if(MathAbs(aligned - volume) > tolerance)
+        {
+            errorOut = StringFormat("%s volume %.8f is not aligned to broker step %.8f (min %.8f)",
+                                    label, volume, stepVolume, minVolume);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool ValidateInputVolumes()
+{
+    double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double stepVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+    if(minVolume <= 0.0 || maxVolume <= 0.0 || stepVolume <= 0.0)
+    {
+        HandleError(OP_INIT, 0,
+                   StringFormat("Invalid symbol volume metadata: min=%.8f max=%.8f step=%.8f",
+                               minVolume, maxVolume, stepVolume), true);
+        return false;
+    }
+
+    if(lot <= 0.0)
+    {
+        HandleError(OP_INIT, 0, StringFormat("Input lot must be > 0 (got %.8f)", lot), true);
+        return false;
+    }
+
+    if(scalpLotMultiplier < 0.0 || trendLotMultiplier < 0.0)
+    {
+        HandleError(OP_INIT, 0,
+                   StringFormat("Lot multipliers must be >= 0 (scalp=%.4f trend=%.4f)",
+                               scalpLotMultiplier, trendLotMultiplier), true);
+        return false;
+    }
+
+    double scalpLot = NormalizeDouble(lot * scalpLotMultiplier, 8);
+    double trendLot = NormalizeDouble(lot * trendLotMultiplier, 8);
+
+    if(scalpLot <= 0.0 && trendLot <= 0.0)
+    {
+        HandleError(OP_INIT, 0,
+                   StringFormat("Both derived lots are zero/non-positive (scalp=%.8f trend=%.8f)",
+                               scalpLot, trendLot), true);
+        return false;
+    }
+
+    string validationError = "";
+    if(scalpLot > 0.0 && !ValidateSingleVolume(scalpLot, minVolume, maxVolume, stepVolume, "Scalp", validationError))
+    {
+        HandleError(OP_INIT, 0, validationError, true);
+        return false;
+    }
+
+    if(trendLot > 0.0 && !ValidateSingleVolume(trendLot, minVolume, maxVolume, stepVolume, "Trend", validationError))
+    {
+        HandleError(OP_INIT, 0, validationError, true);
+        return false;
+    }
+
+    Print(StringFormat("✅ Volume validation passed | Broker[min=%.4f max=%.4f step=%.4f] | Derived[scalp=%.4f trend=%.4f]",
+                       minVolume, maxVolume, stepVolume, scalpLot, trendLot));
+    return true;
+}
+
+bool CanCallAeronDll(bool requireConnected = true)
+{
+    if(AeronPublishMode == AERON_PUBLISH_NONE)
+        return false;
+
+    if(!(bool)TerminalInfoInteger(TERMINAL_DLLS_ALLOWED))
+        return false;
+
+    if(requireConnected && !(bool)TerminalInfoInteger(TERMINAL_CONNECTED))
+        return false;
+
+    return true;
+}
+
+bool CanPublishAeronSignals()
+{
+    if(!CanCallAeronDll(true))
+        return false;
+
+    if(!g_AeronIpcStarted && !g_AeronUdpStarted)
+        return false;
+
+    return true;
 }
 
 // V20.4 - JSON Publishing Forward Declarations
@@ -553,6 +669,12 @@ bool PublishJSONToMultipleTopics(char &buffer[], string baseTopic, string topicS
         // Re-build the JSON payload with the current topic
         // Find the actual message content (everything after "message":")
         string originalPayload = CharArrayToString(buffer);
+        if(StringLen(originalPayload) < 16)
+        {
+            Print("ERROR: Invalid/empty payload while publishing to topic '", targetTopic, "'");
+            failureCount++;
+            continue;
+        }
         
         // Extract the message content (between "message\":\" and the closing \")
         int messageStart = StringFind(originalPayload, "\"message\":\"");
@@ -564,7 +686,17 @@ bool PublishJSONToMultipleTopics(char &buffer[], string baseTopic, string topicS
         }
         
         messageStart += 11;  // Length of "\"message\":\"" - position at start of message content
-        int messageEnd = StringLen(originalPayload) - 2;  // Before closing "}
+        int messageEnd = StringFind(originalPayload, "\"}", messageStart);
+        if(messageEnd == -1)
+        {
+            messageEnd = StringLen(originalPayload) - 2;
+        }
+        if(messageEnd <= messageStart)
+        {
+            Print("ERROR: Invalid payload format - message boundaries not found for topic '", targetTopic, "'");
+            failureCount++;
+            continue;
+        }
         
         string messageContent = StringSubstr(originalPayload, messageStart, messageEnd - messageStart);
         
@@ -619,7 +751,7 @@ string TimeToISO8601(datetime time)
 {
     MqlDateTime dt;
     TimeToStruct(time, dt);
-    
+
     return StringFormat("%04d-%02d-%02dT%02d:%02d:%02dZ",
                         dt.year, dt.mon, dt.day,
                         dt.hour, dt.min, dt.sec);
@@ -843,7 +975,12 @@ bool PublishJSON(char &buffer[], string topic)
         }
     }
     
-    if(payloadLength == 0)
+    if(payloadLength == 0 && ArraySize(buffer) > 0 && buffer[0] != 0)
+    {
+        payloadLength = ArraySize(buffer);
+    }
+
+    if(payloadLength <= 0)
     {
         Print("ERROR: Empty payload for topic '", topic, "'");
         return false;
@@ -856,13 +993,12 @@ bool PublishJSON(char &buffer[], string topic)
     
     ulong startTime = GetMicrosecondCount();
     
-    // CRASH FIX - Reset error before WebRequest
-    ResetLastError();
-    int httpResult = WebRequest("POST", url, headers, timeout, sendBuffer, result, resultHeaders);
+    int httpResult = -1;
+    bool requestOk = SafeWebRequest("POST", url, headers, timeout, sendBuffer, result, resultHeaders, httpResult, 3);
     
     ulong latency = GetMicrosecondCount() - startTime;
     
-    if(httpResult == -1)
+    if(!requestOk || httpResult == -1)
     {
         int errorCode = GetLastError();
         Print("ERROR: WebRequest failed for topic '", topic, "' - Error: ", errorCode);
@@ -992,6 +1128,14 @@ void PublishExitSignal(string direction, string exitReason)
 void CleanupAeronPublishersForce()
 {
     Print("=== FORCED AERON CLEANUP ===");
+
+    if(!CanCallAeronDll(true))
+    {
+        Print("Skipping forced Aeron cleanup (DLL/connection state not safe)");
+        g_AeronIpcStarted = false;
+        g_AeronUdpStarted = false;
+        return;
+    }
     
     // Safety check - verify we're in a safe state to operate
     if(!IsSafeToOperate())
@@ -1140,6 +1284,12 @@ int OnInit()
         Print("Enhanced position closure with retry logic will be used");
         Print("MaxClosureRetries: ", MaxClosureRetries);
         Print("ClosureRetryDelay: ", ClosureRetryDelay, "ms");
+    }
+
+    if(!ValidateInputVolumes())
+    {
+        HandleError(OP_INIT, 0, "EA initialization failed due to invalid volume configuration", true);
+        return INIT_FAILED;
     }
 
     // --- V20.3: Set Order Filling Policy ---
@@ -1422,8 +1572,26 @@ int OnInit()
     // ===============================
     // V20.7 - Aeron Publishing Setup (Multi-Channel)
     // ===============================
-    if(AeronPublishMode != AERON_PUBLISH_NONE)
+    bool dllsAllowed = (bool)TerminalInfoInteger(TERMINAL_DLLS_ALLOWED);
+    if(AeronPublishMode != AERON_PUBLISH_NONE && !dllsAllowed)
     {
+        HandleError(OP_DLL_CALL, 0, "DLL calls are disabled in MT5 options. Aeron publishing skipped.", false);
+        Print("Aeron Binary Publishing skipped: enable 'Allow DLL imports' in MT5 Expert settings.");
+    }
+    else if(AeronPublishMode != AERON_PUBLISH_NONE)
+    {
+        if(!(bool)TerminalInfoInteger(TERMINAL_CONNECTED))
+        {
+            HandleError(OP_INIT, 0, "Terminal is disconnected. Skipping Aeron publisher startup.", false);
+        }
+        else
+        {
+        if(AeronPublishStreamId <= 0 || StringLen(AeronPublishDir) == 0)
+        {
+            HandleError(OP_INIT, 0, "Invalid Aeron config (stream id <= 0 or empty directory). Aeron publishing skipped.", false);
+        }
+        else
+        {
         Print("=== AERON BINARY PUBLISHING CONFIGURATION ===");
         Print("Aeron Publishing Mode: ", EnumToString(AeronPublishMode));
         Print("Aeron Directory: ", AeronPublishDir);
@@ -1437,6 +1605,12 @@ int OnInit()
         // Start IPC publisher if needed
         if(AeronPublishMode == AERON_PUBLISH_IPC_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP)
         {
+            if(StringLen(AeronPublishChannelIpc) == 0)
+            {
+                HandleError(OP_INIT, 0, "Aeron IPC channel is empty. Skipping IPC publisher start.", false);
+            }
+            else
+            {
             Print("Starting IPC Publisher...");
             Print("IPC Channel: ", AeronPublishChannelIpc);
             
@@ -1498,11 +1672,18 @@ int OnInit()
                 Print("✅ Aeron IPC publisher started successfully");
                 Print("IPC consumers can subscribe on channel: ", AeronPublishChannelIpc);
             }
+            }
         }
         
         // Start UDP publisher if needed
         if(AeronPublishMode == AERON_PUBLISH_UDP_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP)
         {
+            if(StringLen(AeronPublishChannelUdp) == 0)
+            {
+                HandleError(OP_INIT, 0, "Aeron UDP channel is empty. Skipping UDP publisher start.", false);
+            }
+            else
+            {
             Print("Starting UDP Publisher...");
             Print("UDP Channel: ", AeronPublishChannelUdp);
             
@@ -1565,6 +1746,7 @@ int OnInit()
                 Print("✅ Aeron UDP publisher started successfully");
                 Print("UDP consumers can subscribe on channel: ", AeronPublishChannelUdp);
             }
+            }
         }
         
         // Summary
@@ -1601,6 +1783,8 @@ int OnInit()
         else
         {
             Print("⚠️ WARNING: No Aeron publishers were successfully started");
+        }
+        }
         }
     }
     else
@@ -1640,6 +1824,15 @@ void OnDeinit(const int reason)
     // V20.8.3 - Safe Aeron publisher cleanup with state tracking and exception handling
     if(AeronPublishMode != AERON_PUBLISH_NONE)
     {
+        if(!CanCallAeronDll(true))
+        {
+            Print("Skipping Aeron cleanup on deinit (DLL/connection state not safe)");
+            g_AeronIpcStarted = false;
+            g_AeronUdpStarted = false;
+            g_LastPublisherCleanup = TimeCurrent();
+        }
+        else
+        {
         Print("Cleaning up Aeron publishers...");
         
         if((AeronPublishMode == AERON_PUBLISH_IPC_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP) && g_AeronIpcStarted)
@@ -1680,6 +1873,7 @@ void OnDeinit(const int reason)
         
         g_LastPublisherCleanup = TimeCurrent();
         Print("Publisher cleanup timestamp recorded: ", TimeToString(g_LastPublisherCleanup));
+        }
     }
     
     // Print error statistics
@@ -2054,7 +2248,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                 PublishExitSignal("short", exitReason);
                 
                 // V20.7 - Aeron exit signal publishing (multi-channel)
-                if(AeronPublishMode != AERON_PUBLISH_NONE)
+                if(CanPublishAeronSignals())
                 {
                     // V20.7 - Use global Aeron symbol (initialized in OnInit)
                     if(dealReason == DEAL_REASON_TP)
@@ -2114,7 +2308,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                 PublishExitSignal("long", exitReason);
                 
                 // V20.7 - Aeron exit signal publishing (multi-channel)
-                if(AeronPublishMode != AERON_PUBLISH_NONE)
+                if(CanPublishAeronSignals())
                 {
                     // V20.7 - Use global Aeron symbol (initialized in OnInit)
                     if(dealReason == DEAL_REASON_TP)
@@ -2219,6 +2413,12 @@ bool IsInitialDelayOver()
  */
 bool FetchTradingHoursFromAPI()
 {
+    if(StringLen(HOST_URI) == 0 || StringLen(API_Symbol) == 0)
+    {
+        HandleError(OP_WEBREQUEST, 0, "HOST_URI or API_Symbol is empty", false);
+        return false;
+    }
+
     string url = "http://" + HOST_URI + "/api/trading-hours?symbol=" + API_Symbol;
     string headers = "Content-Type: application/json\r\n";
     char data[];
@@ -2228,11 +2428,10 @@ bool FetchTradingHoursFromAPI()
     
     Print("Fetching trading hours from API: ", url);
     
-    // CRASH FIX - Reset error before WebRequest (called during OnInit)
-    ResetLastError();
-    int httpResult = WebRequest("GET", url, headers, timeout, data, result, resultHeaders);
+    int httpResult = -1;
+    bool requestOk = SafeWebRequest("GET", url, headers, timeout, data, result, resultHeaders, httpResult, 2);
     
-    if(httpResult == -1)
+    if(!requestOk || httpResult == -1)
     {
         int errorCode = GetLastError();
         Print("❌ WebRequest error: ", errorCode);
@@ -2885,10 +3084,12 @@ void OpenBuyPositions()
     // ===============================================
     // V20.6 - Aeron Binary Signal Publishing (AFTER successful trades)
     // ===============================================
-    if(AeronPublishMode != AERON_PUBLISH_NONE && (scalpBuyOpened || trendBuyOpened))
+    if(CanPublishAeronSignals() && (scalpBuyOpened || trendBuyOpened))
     {
+        if(StringLen(g_AeronSymbol) == 0) g_AeronSymbol = _Symbol;
+        if(StringLen(g_AeronInstrument) == 0) g_AeronInstrument = g_AeronSymbol;
+
         // V20.7 - Use global Aeron symbol and convert points to ticks
-        
         // Calculate confidence based on stochastic values
         double mainBuffer[3], signalBuffer[3];
 
@@ -2909,6 +3110,8 @@ void OpenBuyPositions()
         int slTicks = ConvertPointsToFuturesTicks(SL, g_AeronSymbol);
         int profitOffsetPoints = (int)(TP * 0.4);
         int profitTicks = ConvertPointsToFuturesTicks(SL + profitOffsetPoints, g_AeronSymbol);
+        if(slTicks < 0) slTicks = 0;
+        if(profitTicks < 0) profitTicks = 0;
 
         // Publish LongEntry1 (stop loss only)
         bool pub1 = AeronPublishSignalDual(
@@ -3046,15 +3249,18 @@ void OpenSellPositions()
     // ===============================================
     // V20.7 - Aeron Binary Signal Publishing (Multi-Channel) - AFTER successful trades
     // ===============================================
-    if(AeronPublishMode != AERON_PUBLISH_NONE && (scalpSellOpened || trendSellOpened))
+    if(CanPublishAeronSignals() && (scalpSellOpened || trendSellOpened))
     {
+        if(StringLen(g_AeronSymbol) == 0) g_AeronSymbol = _Symbol;
+        if(StringLen(g_AeronInstrument) == 0) g_AeronInstrument = g_AeronSymbol;
+
         // V20.7 - Use global Aeron symbol and convert points to ticks
 
         double mainBuffer[3], signalBuffer[3];
 
         float confidence = 80.0;
-        if(SafeCopyBuffer(stochHandle, 0, 0, 3, mainBuffer, OP_INDICATOR) &&
-           SafeCopyBuffer(stochHandle, 1, 0, 3, signalBuffer, OP_INDICATOR))
+          if(SafeCopyBuffer(stochHandle, 0, 0, 3, mainBuffer, OP_INDICATOR) &&
+              SafeCopyBuffer(stochHandle, 1, 0, 3, signalBuffer, OP_INDICATOR))
         {
             double K = mainBuffer[0];
             double D = signalBuffer[0];
@@ -3069,6 +3275,8 @@ void OpenSellPositions()
         int slTicks = ConvertPointsToFuturesTicks(SL, g_AeronSymbol);
         int profitOffsetPoints = (int)(TP * 0.4);
         int profitTicks = ConvertPointsToFuturesTicks(SL + profitOffsetPoints, g_AeronSymbol);
+        if(slTicks < 0) slTicks = 0;
+        if(profitTicks < 0) profitTicks = 0;
 
         // Publish ShortEntry1 (stop loss only)
         bool pub1 = AeronPublishSignalDual(

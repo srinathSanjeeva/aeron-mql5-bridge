@@ -107,3 +107,7 @@ install_manifest.txt
 
 # Snyk Security Extension - AI Rules (auto-generated)
 .github/instructions/snyk_rules.instructions.md
+
+# Temporary Claude working dirs/files
+tmpclaude-*-cwd
+tmpclaude-*

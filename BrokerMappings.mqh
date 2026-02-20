@@ -32,6 +32,7 @@ bool RegisterBrokerMappings(ENUM_BROKER_PROFILE profile)
          success &= (AeronBridge_RegisterInstrumentMapW("YM", "DJ30", 1.0, 0.1) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("ES", "SPX500", 0.25, 0.1) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("NQ", "TECH100", 0.25, 0.1) == 1);
+         success &= (AeronBridge_RegisterInstrumentMapW("MBT", "BTCUSD", 5.0, 0.01) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("RTY", "US2000", 0.10, 0.1) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("ZB", "US10Y", 0.03125, 0.01) == 1);
         //  success &= (AeronBridge_RegisterInstrumentMapW("GC", "GOLD", 0.10, 0.01) == 1);
@@ -44,6 +45,7 @@ bool RegisterBrokerMappings(ENUM_BROKER_PROFILE profile)
          success &= (AeronBridge_RegisterInstrumentMapW("YM", "US30", 1.0, 0.1) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("ES", "SPX500", 0.25, 0.1) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("NQ", "NAS100", 0.25, 0.1) == 1);
+         success &= (AeronBridge_RegisterInstrumentMapW("MBT", "BTCUSD", 5.0, 0.01) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("RTY", "RUSSELL", 0.10, 0.1) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("ZB", "BOND", 0.03125, 0.01) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("GC", "XAUUSD", 0.10, 0.01) == 1);
@@ -56,6 +58,7 @@ bool RegisterBrokerMappings(ENUM_BROKER_PROFILE profile)
          success &= (AeronBridge_RegisterInstrumentMapW("YM", "YMH25", 1.0, 0.01) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("ES", "ESH25", 0.25, 0.01) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("NQ", "NQH25", 0.25, 0.01) == 1);
+         success &= (AeronBridge_RegisterInstrumentMapW("MBT", "BTCUSD", 5.0, 0.01) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("RTY", "RTYH25", 0.10, 0.01) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("ZB", "ZBH25", 0.03125, 0.015625) == 1);
          success &= (AeronBridge_RegisterInstrumentMapW("GC", "GCJ25", 0.10, 0.01) == 1);

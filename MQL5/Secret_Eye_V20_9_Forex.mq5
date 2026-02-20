@@ -160,6 +160,7 @@ input ENUM_AERON_PUBLISH_MODE AeronPublishMode = AERON_PUBLISH_IPC_AND_UDP; // A
 input string            AeronPublishChannelIpc = "aeron:ipc"; // Aeron IPC channel
 input string            AeronPublishChannelUdp = "aeron:udp?endpoint=192.168.2.15:40123"; // Aeron UDP channel
 input int               AeronPublishStreamId = 1001;       // Aeron publish stream ID
+input string            AeronPublishStreamIds = "";       // Optional CSV stream IDs (e.g. "1001,1002"). Empty = use AeronPublishStreamId
 input string            AeronPublishDir = "C:\\aeron\\standalone"; // Aeron directory
 input string            AeronSourceTag = "SecretEye_V20_9_Forex"; // Source strategy identifier
 input string            AeronInstrumentName = "";          // Custom symbol/instrument name for Aeron (e.g. "6S") - sets both fields
@@ -195,6 +196,11 @@ static string       g_AeronInstrument = "";   // Full instrument name (e.g., "6A
 static bool         g_AeronIpcStarted = false;  // Track IPC publisher state
 static bool         g_AeronUdpStarted = false;  // Track UDP publisher state
 static datetime     g_LastPublisherCleanup = 0; // Track last cleanup time
+static ENUM_AERON_PUBLISH_MODE g_AeronPublishModeEffective = AERON_PUBLISH_NONE; // Runtime mode (can be disabled on config errors)
+
+#define MAX_AERON_STREAM_IDS 16
+static int          g_AeronStreamIds[MAX_AERON_STREAM_IDS];
+static int          g_AeronStreamIdCount = 0;
 
 // V20.1 - Daily Profit Protection Variables
 static double       DailyBaseEquity = 0;          // Account equity at session start
@@ -316,6 +322,77 @@ int ParseTopicNames(string topicInput, string &topics[]);
 bool PublishJSONToMultipleTopics(char &buffer[], string baseTopic, string topicSuffix);
 string EscapeJsonString(string str);
 void CleanupAeronPublishersForce();
+int ParseAeronStreamIdList(string streamIdsCsv, int &streamIds[]);
+string StreamIdListToString(const int &streamIds[], int count);
+
+int ParseAeronStreamIdList(string streamIdsCsv, int &streamIds[])
+{
+    int count = 0;
+
+    if(StringLen(streamIdsCsv) <= 0)
+    {
+        if(AeronPublishStreamId > 0)
+        {
+            streamIds[0] = AeronPublishStreamId;
+            return 1;
+        }
+        return 0;
+    }
+
+    string tokens[];
+    int tokenCount = StringSplit(streamIdsCsv, ',', tokens);
+    for(int i = 0; i < tokenCount && count < MAX_AERON_STREAM_IDS; i++)
+    {
+        string token = tokens[i];
+        StringTrimLeft(token);
+        StringTrimRight(token);
+
+        if(token == "")
+            continue;
+
+        int sid = (int)StringToInteger(token);
+        if(sid <= 0)
+        {
+            PrintFormat("[AERON_CFG] Ignoring invalid stream id token '%s'", token);
+            continue;
+        }
+
+        bool exists = false;
+        for(int j = 0; j < count; j++)
+        {
+            if(streamIds[j] == sid)
+            {
+                exists = true;
+                break;
+            }
+        }
+
+        if(!exists)
+        {
+            streamIds[count] = sid;
+            count++;
+        }
+    }
+
+    if(count == 0 && AeronPublishStreamId > 0)
+    {
+        streamIds[0] = AeronPublishStreamId;
+        count = 1;
+    }
+
+    return count;
+}
+
+string StreamIdListToString(const int &streamIds[], int count)
+{
+    string out = "";
+    for(int i = 0; i < count; i++)
+    {
+        if(i > 0) out += ",";
+        out += IntegerToString(streamIds[i]);
+    }
+    return out;
+}
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -456,28 +533,55 @@ int OnInit()
     // ===============================================
     // V20.8 - Multi-Channel Aeron Publisher Initialization
     // ===============================================
-    if(AeronPublishMode != AERON_PUBLISH_NONE)
+    g_AeronPublishModeEffective = AeronPublishMode;
+    if(g_AeronPublishModeEffective != AERON_PUBLISH_NONE)
     {
         Print("=== V20.8 - Multi-Channel Aeron Publisher Initialization ===");
+
+        g_AeronStreamIdCount = ParseAeronStreamIdList(AeronPublishStreamIds, g_AeronStreamIds);
+        if(g_AeronStreamIdCount <= 0)
+        {
+            Print("⚠️  No valid Aeron stream IDs configured. Disabling Aeron publishing for this run.");
+            g_AeronPublishModeEffective = AERON_PUBLISH_NONE;
+        }
+        else
+        {
+            PrintFormat("Configured Aeron stream IDs: %s", StreamIdListToString(g_AeronStreamIds, g_AeronStreamIdCount));
+        }
         
         bool ipcSuccess = false;
         bool udpSuccess = false;
         
         // Initialize IPC channel if needed
-        if(AeronPublishMode == AERON_PUBLISH_IPC_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP)
+        if(g_AeronPublishModeEffective == AERON_PUBLISH_IPC_ONLY || g_AeronPublishModeEffective == AERON_PUBLISH_IPC_AND_UDP)
         {
             Print("Starting IPC Aeron publisher...");
             PrintFormat("  Channel: %s", AeronPublishChannelIpc);
-            PrintFormat("  Stream ID: %d", AeronPublishStreamId);
+            PrintFormat("  Stream IDs: %s", StreamIdListToString(g_AeronStreamIds, g_AeronStreamIdCount));
             PrintFormat("  Directory: %s", AeronPublishDir);
             
             if(!g_AeronIpcStarted)  // V20.8.3 - Check state before starting
             {
-                if(AeronBridge_StartPublisherIpcW(AeronPublishDir, AeronPublishChannelIpc, AeronPublishStreamId, 5000) != 0)
+                int startedCount = 0;
+                for(int i = 0; i < g_AeronStreamIdCount; i++)
+                {
+                    int sid = g_AeronStreamIds[i];
+                    if(AeronBridge_StartPublisherIpcW(AeronPublishDir, AeronPublishChannelIpc, sid, 5000) != 0)
+                    {
+                        startedCount++;
+                        PrintFormat("✅ IPC stream started: %d", sid);
+                    }
+                    else
+                    {
+                        PrintFormat("❌ Failed to start IPC stream: %d", sid);
+                    }
+                }
+
+                if(startedCount > 0)
                 {
                     ipcSuccess = true;
                     g_AeronIpcStarted = true;  // V20.8.3 - Track successful start
-                    Print("✅ IPC Aeron publisher started successfully");
+                    PrintFormat("✅ IPC Aeron publisher started for %d/%d streams", startedCount, g_AeronStreamIdCount);
                 }
                 else
                 {
@@ -497,20 +601,35 @@ int OnInit()
         }
         
         // Initialize UDP channel if needed
-        if(AeronPublishMode == AERON_PUBLISH_UDP_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP)
+        if(g_AeronPublishModeEffective == AERON_PUBLISH_UDP_ONLY || g_AeronPublishModeEffective == AERON_PUBLISH_IPC_AND_UDP)
         {
             Print("Starting UDP Aeron publisher...");
             PrintFormat("  Channel: %s", AeronPublishChannelUdp);
-            PrintFormat("  Stream ID: %d", AeronPublishStreamId);
+            PrintFormat("  Stream IDs: %s", StreamIdListToString(g_AeronStreamIds, g_AeronStreamIdCount));
             PrintFormat("  Directory: %s", AeronPublishDir);
             
             if(!g_AeronUdpStarted)  // V20.8.3 - Check state before starting
             {
-                if(AeronBridge_StartPublisherUdpW(AeronPublishDir, AeronPublishChannelUdp, AeronPublishStreamId, 5000) != 0)
+                int startedCount = 0;
+                for(int i = 0; i < g_AeronStreamIdCount; i++)
+                {
+                    int sid = g_AeronStreamIds[i];
+                    if(AeronBridge_StartPublisherUdpW(AeronPublishDir, AeronPublishChannelUdp, sid, 5000) != 0)
+                    {
+                        startedCount++;
+                        PrintFormat("✅ UDP stream started: %d", sid);
+                    }
+                    else
+                    {
+                        PrintFormat("❌ Failed to start UDP stream: %d", sid);
+                    }
+                }
+
+                if(startedCount > 0)
                 {
                     udpSuccess = true;
                     g_AeronUdpStarted = true;  // V20.8.3 - Track successful start
-                    Print("✅ UDP Aeron publisher started successfully");
+                    PrintFormat("✅ UDP Aeron publisher started for %d/%d streams", startedCount, g_AeronStreamIdCount);
                 }
                 else
                 {
@@ -532,15 +651,19 @@ int OnInit()
         
         // V20.8 - Report initialization summary
         Print("=== Aeron Publisher Initialization Summary ===");
-        if(AeronPublishMode == AERON_PUBLISH_IPC_ONLY)
+        if(g_AeronPublishModeEffective == AERON_PUBLISH_NONE)
+        {
+            Print("Mode: DISABLED_AT_RUNTIME | Status: ⚠️  DISABLED (invalid stream configuration)");
+        }
+        else if(g_AeronPublishModeEffective == AERON_PUBLISH_IPC_ONLY)
         {
             PrintFormat("Mode: IPC_ONLY | Status: %s", ipcSuccess ? "✅ OPERATIONAL" : "❌ DEGRADED");
         }
-        else if(AeronPublishMode == AERON_PUBLISH_UDP_ONLY)
+        else if(g_AeronPublishModeEffective == AERON_PUBLISH_UDP_ONLY)
         {
             PrintFormat("Mode: UDP_ONLY | Status: %s", udpSuccess ? "✅ OPERATIONAL" : "❌ DEGRADED");
         }
-        else if(AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP)
+        else if(g_AeronPublishModeEffective == AERON_PUBLISH_IPC_AND_UDP)
         {
             string status = "";
             if(ipcSuccess && udpSuccess)
@@ -586,7 +709,7 @@ void OnDeinit(const int reason)
     }
     
     // V20.8.3 - Cleanup Aeron publishers with state tracking
-    if(AeronPublishMode == AERON_PUBLISH_IPC_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP)
+    if(g_AeronPublishModeEffective == AERON_PUBLISH_IPC_ONLY || g_AeronPublishModeEffective == AERON_PUBLISH_IPC_AND_UDP)
     {
         if(g_AeronIpcStarted)  // V20.8.3 - Only cleanup if we started it
         {
@@ -597,7 +720,7 @@ void OnDeinit(const int reason)
         }
     }
     
-    if(AeronPublishMode == AERON_PUBLISH_UDP_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP)
+    if(g_AeronPublishModeEffective == AERON_PUBLISH_UDP_ONLY || g_AeronPublishModeEffective == AERON_PUBLISH_IPC_AND_UDP)
     {
         if(g_AeronUdpStarted)  // V20.8.3 - Only cleanup if we started it
         {
@@ -693,7 +816,7 @@ void OnTick()
                 }
                 
                 // STEP 2: Broadcast FORCE_EXIT to subscribers (after closing local positions)
-                if(reverseDetected && AeronPublishMode != AERON_PUBLISH_NONE)
+                if(reverseDetected && g_AeronPublishModeEffective != AERON_PUBLISH_NONE)
                 {
                     Print("Broadcasting FORCE_EXIT signal to subscribers...");
                     
@@ -707,7 +830,7 @@ void OnTick()
                         0,  // qty (not applicable)
                         100.0,  // confidence (high certainty for force exit)
                         AeronSourceTag,
-                        AeronPublishMode
+                        g_AeronPublishModeEffective
                     );
                     
                     if(published)
@@ -913,19 +1036,19 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                 PublishExitSignal("short", exitReason);
 
                 // V20.9 - Aeron exit signal with signal reversal
-                if(AeronPublishMode != AERON_PUBLISH_NONE)
+                if(g_AeronPublishModeEffective != AERON_PUBLISH_NONE)
                 {
                     if(dealReason == DEAL_REASON_TP)
                     {
                         AeronPublishSignalDual(g_AeronSymbol, g_AeronInstrument, AERON_PROFIT_TARGET,
-                                          0, 0, 0, 1, 50.0, AeronSourceTag, AeronPublishMode);
+                                          0, 0, 0, 1, 50.0, AeronSourceTag, g_AeronPublishModeEffective);
                         Print("[AERON_PUB] ✅ ProfitTarget (short): ", g_AeronSymbol);
                     }
                     else
                     {
                         AeronStrategyAction aeronAction = SignalReversal ? AERON_LONG_STOPLOSS : AERON_SHORT_STOPLOSS;
                         AeronPublishSignalDual(g_AeronSymbol, g_AeronInstrument, aeronAction,
-                                          0, 0, 0, 1, 50.0, AeronSourceTag, AeronPublishMode);
+                                          0, 0, 0, 1, 50.0, AeronSourceTag, g_AeronPublishModeEffective);
                         string signalDir = SignalReversal ? "REVERSED" : "NORMAL";
                         PrintFormat("[AERON_PUB] ✅ ShortStopLoss (%s): %s", signalDir, g_AeronSymbol);
                     }
@@ -976,19 +1099,19 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                 PublishExitSignal("long", exitReason);
 
                 // V20.9 - Aeron exit signal with signal reversal
-                if(AeronPublishMode != AERON_PUBLISH_NONE)
+                if(g_AeronPublishModeEffective != AERON_PUBLISH_NONE)
                 {
                     if(dealReason == DEAL_REASON_TP)
                     {
                         AeronPublishSignalDual(g_AeronSymbol, g_AeronInstrument, AERON_PROFIT_TARGET,
-                                          0, 0, 0, 1, 50.0, AeronSourceTag, AeronPublishMode);
+                                          0, 0, 0, 1, 50.0, AeronSourceTag, g_AeronPublishModeEffective);
                         Print("[AERON_PUB] ✅ ProfitTarget (long): ", g_AeronSymbol);
                     }
                     else
                     {
                         AeronStrategyAction aeronAction = SignalReversal ? AERON_SHORT_STOPLOSS : AERON_LONG_STOPLOSS;
                         AeronPublishSignalDual(g_AeronSymbol, g_AeronInstrument, aeronAction,
-                                          0, 0, 0, 1, 50.0, AeronSourceTag, AeronPublishMode);
+                                          0, 0, 0, 1, 50.0, AeronSourceTag, g_AeronPublishModeEffective);
                         string signalDir = SignalReversal ? "REVERSED" : "NORMAL";
                         PrintFormat("[AERON_PUB] ✅ LongStopLoss (%s): %s", signalDir, g_AeronSymbol);
                     }
@@ -1043,13 +1166,13 @@ void CleanupAeronPublishersForce()
     // Always attempt cleanup, regardless of state flags
     // This handles the case where EA crashed/restarted and state was lost
     
-    if(AeronPublishMode == AERON_PUBLISH_IPC_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP)
+    if(g_AeronPublishModeEffective == AERON_PUBLISH_IPC_ONLY || g_AeronPublishModeEffective == AERON_PUBLISH_IPC_AND_UDP)
     {
         Print("Force cleanup: IPC Aeron publisher");
         AeronBridge_StopPublisherIpc();
     }
     
-    if(AeronPublishMode == AERON_PUBLISH_UDP_ONLY || AeronPublishMode == AERON_PUBLISH_IPC_AND_UDP)
+    if(g_AeronPublishModeEffective == AERON_PUBLISH_UDP_ONLY || g_AeronPublishModeEffective == AERON_PUBLISH_IPC_AND_UDP)
     {
         Print("Force cleanup: UDP Aeron publisher");
         AeronBridge_StopPublisherUdp();
@@ -1165,7 +1288,7 @@ void OpenBuyPositions()
     // ===============================================
     // V20.9 - Aeron Binary Signal Publishing with SIGNAL REVERSAL
     // ===============================================
-    if(AeronPublishMode != AERON_PUBLISH_NONE && (scalpBuyOpened || trendBuyOpened))
+    if(g_AeronPublishModeEffective != AERON_PUBLISH_NONE && (scalpBuyOpened || trendBuyOpened))
     {
         double mainBuffer[3], signalBuffer[3];
 
@@ -1203,7 +1326,7 @@ void OpenBuyPositions()
             1,
             confidence,
             AeronSourceTag,
-            AeronPublishMode
+            g_AeronPublishModeEffective
         );
 
         if(pub1)
@@ -1224,7 +1347,7 @@ void OpenBuyPositions()
             1,
             confidence,
             AeronSourceTag,
-            AeronPublishMode
+            g_AeronPublishModeEffective
         );
 
         if(pub2)
@@ -1348,7 +1471,7 @@ void OpenSellPositions()
     // ===============================================
     // V20.9 - Aeron Binary Signal Publishing with SIGNAL REVERSAL
     // ===============================================
-    if(AeronPublishMode != AERON_PUBLISH_NONE && (scalpSellOpened || trendSellOpened))
+    if(g_AeronPublishModeEffective != AERON_PUBLISH_NONE && (scalpSellOpened || trendSellOpened))
     {
         double mainBuffer[3], signalBuffer[3];
 
@@ -1386,7 +1509,7 @@ void OpenSellPositions()
             1,
             confidence,
             AeronSourceTag,
-            AeronPublishMode
+            g_AeronPublishModeEffective
         );
 
         if(pub1)
@@ -1407,7 +1530,7 @@ void OpenSellPositions()
             1,
             confidence,
             AeronSourceTag,
-            AeronPublishMode
+            g_AeronPublishModeEffective
         );
 
         if(pub2)
@@ -2118,6 +2241,7 @@ bool CheckDailyLossLimit()
     
     if(shouldReset)
     {
+        lastResetTime = TimeCurrent();
         todayStartingBalance = AccountInfoDouble(ACCOUNT_BALANCE);
         DailyBaseEquity = AccountInfoDouble(ACCOUNT_EQUITY);  // Capture equity at session start
         if(stopTradingForDay) Print("Trading day reset at 18:00 EST. Daily loss limit has been reset.");

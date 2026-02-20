@@ -13,9 +13,18 @@ enum AeronStrategyAction
    AERON_SHORT_EXIT     = 6,  // Manual/session close of short
    AERON_LONG_STOPLOSS  = 7,  // Long stop loss triggered
    AERON_SHORT_STOPLOSS = 8,  // Short stop loss triggered
-   AERON_PROFIT_TARGET  = 9   // Profit target hit (scalp)
+   AERON_PROFIT_TARGET  = 9,  // Profit target hit (scalp)
+   AERON_FORCE_EXIT     = 10  // Force exit all positions (reverse signal after hours)
 };
 ```
+
+**Note on FORCE_EXIT (Action 10):**
+
+- Triggered when a reverse signal is detected outside trading hours with `EnableKillSwitch=true`
+- Example: Holding buy positions, sell signal arrives after hours → closes all positions
+- Publisher closes its own positions first, then broadcasts to subscribers
+- Subscribers close ALL positions for the symbol (both buy and sell)
+- SL/TP/qty fields are ignored (set to 0) for this action
 
 ## Publishing Function Signature
 
@@ -23,7 +32,7 @@ enum AeronStrategyAction
 bool AeronPublishSignal(
    string symbol,                    // "ES", "NQ", etc.
    string instrument,                // "ES MAR26", full name
-   AeronStrategyAction action,       // Action enum (1-9)
+   AeronStrategyAction action,       // Action enum (1-10)
    int longSL,                       // Long stop loss (ticks)
    int shortSL,                      // Short stop loss (ticks)
    int profitTarget,                 // Profit target (ticks)
