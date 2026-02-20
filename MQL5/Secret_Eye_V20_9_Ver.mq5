@@ -322,7 +322,7 @@ bool CheckDailyLossLimit();
 bool CheckDailyProfitProtection();
 void OpenBuyPositions();
 void OpenSellPositions();
-void ExecuteImmediateTrade();
+bool ExecuteImmediateTrade();
 bool PositionExistsByTicket(ulong ticket);
 void RecoverExistingPositions();
 void CheckKillSwitchPostTimeRecovery();
@@ -2056,12 +2056,6 @@ void OnTick()
         }
     }
 
-    datetime currentBarTime = (datetime)SeriesInfoInteger(_Symbol, timeFrame, SERIES_LASTBAR_DATE);
-    if(currentBarTime == lastBarTime) return;
-    lastBarTime = currentBarTime;
-
-    UpdateAllPositionStatus();
-    
     // === IMMEDIATE ENTRY LOGIC ===
     // Check if immediate entry is pending and conditions are met
     if(immediateEntryPending && !immediateEntryCompleted)
@@ -2070,9 +2064,15 @@ void OnTick()
         {
             Print("=== EXECUTING PENDING IMMEDIATE ENTRY ===");
             Print("Conditions met: Trading allowed + Initial delay over");
-            ExecuteImmediateTrade();
-            immediateEntryPending = false;
-            immediateEntryCompleted = true;
+            if(ExecuteImmediateTrade())
+            {
+                immediateEntryPending = false;
+                immediateEntryCompleted = true;
+            }
+            else
+            {
+                Print("Immediate entry attempt did not open a position yet; keeping pending state.");
+            }
         }
         else
         {
@@ -2089,6 +2089,12 @@ void OnTick()
             }
         }
     }
+
+    datetime currentBarTime = (datetime)SeriesInfoInteger(_Symbol, timeFrame, SERIES_LASTBAR_DATE);
+    if(currentBarTime == lastBarTime) return;
+    lastBarTime = currentBarTime;
+
+    UpdateAllPositionStatus();
     
     if(!CheckDailyLossLimit())
     {
@@ -3402,7 +3408,7 @@ void OpenSellPositions()
 //| Remaining Support Functions from V20.3                          |
 //+------------------------------------------------------------------+
 
-void ExecuteImmediateTrade()
+bool ExecuteImmediateTrade()
 {
     Print("=== EXECUTING IMMEDIATE TRADE ===");
     UpdateAllPositionStatus();
@@ -3412,14 +3418,14 @@ void ExecuteImmediateTrade()
         Print("Immediate Entry: Trading is not allowed at this time.");
         Print("Current trading hours: ", StringFormat("%02d:%02d", currentStartHour, currentStartMinute), 
               " to ", StringFormat("%02d:%02d", currentEndHour, currentEndMinute));
-        return;
+        return false;
     }
     
     if(!IsInitialDelayOver())
     {
         Print("Immediate Entry: Respecting DelayOnInitialOrder setting - waiting for initial delay to pass.");
         Print("DelayOnInitialOrder: ", DelayOnInitialOrder, " seconds");
-        return;
+        return false;
     }
 
     if(scalpBuyOpened || trendBuyOpened || scalpSellOpened || trendSellOpened)
@@ -3427,7 +3433,7 @@ void ExecuteImmediateTrade()
         Print("Immediate entry skipped: A position for this EA already exists.");
         Print("Position status - ScalpBuy:", scalpBuyOpened, " TrendBuy:", trendBuyOpened, 
               " ScalpSell:", scalpSellOpened, " TrendSell:", trendSellOpened);
-        return;
+        return false;
     }
 
     double immediateMainLine[2], immediateSignalLine[2];
@@ -3435,7 +3441,7 @@ void ExecuteImmediateTrade()
        !SafeCopyBuffer(stochHandle, 1, 1, 2, immediateSignalLine, OP_INDICATOR))
     {
         Print("Immediate entry failed: Could not get indicator data safely.");
-        return;
+        return false;
     }
     
     double last_closed_main = immediateMainLine[0];
@@ -3445,21 +3451,38 @@ void ExecuteImmediateTrade()
     {
         Print("Immediate entry condition: BUY (Main > Signal).");
         OpenBuyPositions();
-        firstTradeOfDayPlaced = true;
-        Print("✅ Immediate entry BUY positions opened successfully");
+        UpdateAllPositionStatus();
+        if(scalpBuyOpened || trendBuyOpened)
+        {
+            firstTradeOfDayPlaced = true;
+            Print("✅ Immediate entry BUY positions opened successfully");
+            return true;
+        }
+
+        Print("Immediate entry BUY attempted, but no BUY position was opened.");
+        return false;
     }
     else if(last_closed_main < last_closed_sign)
     {
         Print("Immediate entry condition: SELL (Main < Signal).");
         OpenSellPositions();
-        firstTradeOfDayPlaced = true;
-        Print("✅ Immediate entry SELL positions opened successfully");
+        UpdateAllPositionStatus();
+        if(scalpSellOpened || trendSellOpened)
+        {
+            firstTradeOfDayPlaced = true;
+            Print("✅ Immediate entry SELL positions opened successfully");
+            return true;
+        }
+
+        Print("Immediate entry SELL attempted, but no SELL position was opened.");
+        return false;
     }
     else
     {
         Print("Immediate entry skipped: No clear direction (Main == Signal).");
         Print("Stochastic values - Main: ", DoubleToString(last_closed_main, 2), 
               " Signal: ", DoubleToString(last_closed_sign, 2));
+        return false;
     }
 }
 
