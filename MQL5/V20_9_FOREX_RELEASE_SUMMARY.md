@@ -1,5 +1,7 @@
 # Secret Eye V20.9 FOREX Edition - Release Summary
 
+> Note: For the latest Forex implementation with X1/X2 dual-timeframe bias-trigger logic, see `MQL5/V20_10_FOREX_RELEASE_SUMMARY.md`.
+
 ## Overview
 
 **Version**: 20.90 (FOREX Edition)  
@@ -361,12 +363,10 @@ Result: ✅ PASS
 ## Known Limitations
 
 1. **Manual Configuration Required**:
-
    - User must determine correct reversal setting for each pair
    - No automatic detection of USD-base vs USD-quote
 
 2. **Single Reversal Mode**:
-
    - Reversal applies to ALL signals from the EA instance
    - Cannot selectively reverse some signals but not others
 
