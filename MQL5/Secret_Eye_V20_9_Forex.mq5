@@ -303,6 +303,7 @@ void SetTradingHoursForToday();
 void CheckAndUpdateDailyTradingHours();
 string GetDayOfWeekString(int dayOfWeek);
 bool ParseTimeString(string timeStr, int &hour, int &minute);
+void GetCurrentEasternTime(MqlDateTime &easternTime);
 ENUM_ACCOUNT_MODE DetectAccountMarginMode();
 int CountPositionsByTypeAndSymbol(ENUM_POSITION_TYPE posType);
 int ConvertPointsToFuturesTicks(int points, string futuresSymbol);  // V20.7 - Tick conversion
@@ -2630,28 +2631,41 @@ bool ParseTradingHoursJSON(string jsonResponse)
 {
     Print("Parsing trading hours JSON response...");
 
+    string compactJson = jsonResponse;
+    StringReplace(compactJson, " ", "");
+    StringReplace(compactJson, "\r", "");
+    StringReplace(compactJson, "\n", "");
+    StringReplace(compactJson, "\t", "");
+
     cachedTradingHours.symbol = "";
     cachedTradingHours.timezone = "";
+    cachedTradingHours.monday.start = "";    cachedTradingHours.monday.end = "";
+    cachedTradingHours.tuesday.start = "";   cachedTradingHours.tuesday.end = "";
+    cachedTradingHours.wednesday.start = ""; cachedTradingHours.wednesday.end = "";
+    cachedTradingHours.thursday.start = "";  cachedTradingHours.thursday.end = "";
+    cachedTradingHours.friday.start = "";    cachedTradingHours.friday.end = "";
+    cachedTradingHours.saturday.start = "";  cachedTradingHours.saturday.end = "";
+    cachedTradingHours.sunday.start = "";    cachedTradingHours.sunday.end = "";
 
-    int symbolPos = StringFind(jsonResponse, "\"symbol\":");
+    int symbolPos = StringFind(compactJson, "\"symbol\":");
     if(symbolPos != -1)
     {
-        int startQuote = StringFind(jsonResponse, "\"", symbolPos + 9);
-        int endQuote = StringFind(jsonResponse, "\"", startQuote + 1);
+        int startQuote = StringFind(compactJson, "\"", symbolPos + 9);
+        int endQuote = StringFind(compactJson, "\"", startQuote + 1);
         if(startQuote != -1 && endQuote != -1)
         {
-            cachedTradingHours.symbol = StringSubstr(jsonResponse, startQuote + 1, endQuote - startQuote - 1);
+            cachedTradingHours.symbol = StringSubstr(compactJson, startQuote + 1, endQuote - startQuote - 1);
         }
     }
 
-    int timezonePos = StringFind(jsonResponse, "\"timezone\":");
+    int timezonePos = StringFind(compactJson, "\"timezone\":");
     if(timezonePos != -1)
     {
-        int startQuote = StringFind(jsonResponse, "\"", timezonePos + 11);
-        int endQuote = StringFind(jsonResponse, "\"", startQuote + 1);
+        int startQuote = StringFind(compactJson, "\"", timezonePos + 11);
+        int endQuote = StringFind(compactJson, "\"", startQuote + 1);
         if(startQuote != -1 && endQuote != -1)
         {
-            cachedTradingHours.timezone = StringSubstr(jsonResponse, startQuote + 1, endQuote - startQuote - 1);
+            cachedTradingHours.timezone = StringSubstr(compactJson, startQuote + 1, endQuote - startQuote - 1);
         }
     }
 
@@ -2659,34 +2673,76 @@ bool ParseTradingHoursJSON(string jsonResponse)
 
     for(int i = 0; i < 7; i++)
     {
-        string dayPattern = "\"" + days[i] + "\":{\"start\":\"";
-        int dayPos = StringFind(jsonResponse, dayPattern);
+        string startTime = "";
+        string endTime = "";
+        string dayPattern = "\"" + days[i] + "\":{";
+        int dayPos = StringFind(compactJson, dayPattern);
 
         if(dayPos != -1)
         {
-            int startPos = dayPos + StringLen(dayPattern);
-            int startEndPos = StringFind(jsonResponse, "\"", startPos);
-            string startTime = StringSubstr(jsonResponse, startPos, startEndPos - startPos);
-
-            string endPattern = "\"end\":\"";
-            int endPatternPos = StringFind(jsonResponse, endPattern, startEndPos);
-            if(endPatternPos != -1)
+            int dayStart = dayPos + StringLen(dayPattern);
+            int dayEnd = StringFind(compactJson, "}", dayStart);
+            if(dayEnd != -1)
             {
-                int endPos = endPatternPos + StringLen(endPattern);
-                int endEndPos = StringFind(jsonResponse, "\"", endPos);
-                string endTime = StringSubstr(jsonResponse, endPos, endEndPos - endPos);
+                string dayBlock = StringSubstr(compactJson, dayStart, dayEnd - dayStart);
 
-                switch(i)
+                string startPattern = "\"start\":";
+                int startPatternPos = StringFind(dayBlock, startPattern);
+                if(startPatternPos != -1)
                 {
-                    case 0: cachedTradingHours.monday.start = startTime; cachedTradingHours.monday.end = endTime; break;
-                    case 1: cachedTradingHours.tuesday.start = startTime; cachedTradingHours.tuesday.end = endTime; break;
-                    case 2: cachedTradingHours.wednesday.start = startTime; cachedTradingHours.wednesday.end = endTime; break;
-                    case 3: cachedTradingHours.thursday.start = startTime; cachedTradingHours.thursday.end = endTime; break;
-                    case 4: cachedTradingHours.friday.start = startTime; cachedTradingHours.friday.end = endTime; break;
-                    case 5: cachedTradingHours.saturday.start = startTime; cachedTradingHours.saturday.end = endTime; break;
-                    case 6: cachedTradingHours.sunday.start = startTime; cachedTradingHours.sunday.end = endTime; break;
+                    int startValuePos = startPatternPos + StringLen(startPattern);
+                    if(startValuePos < StringLen(dayBlock))
+                    {
+                        int startChar = StringGetCharacter(dayBlock, startValuePos);
+                        if(startChar == 34)
+                        {
+                            int startQuoteEnd = StringFind(dayBlock, "\"", startValuePos + 1);
+                            if(startQuoteEnd != -1)
+                            {
+                                startTime = StringSubstr(dayBlock, startValuePos + 1, startQuoteEnd - startValuePos - 1);
+                            }
+                        }
+                        else if(StringSubstr(dayBlock, startValuePos, 4) == "null")
+                        {
+                            startTime = "";
+                        }
+                    }
+                }
+
+                string endPattern = "\"end\":";
+                int endPatternPos = StringFind(dayBlock, endPattern);
+                if(endPatternPos != -1)
+                {
+                    int endValuePos = endPatternPos + StringLen(endPattern);
+                    if(endValuePos < StringLen(dayBlock))
+                    {
+                        int endChar = StringGetCharacter(dayBlock, endValuePos);
+                        if(endChar == 34)
+                        {
+                            int endQuoteEnd = StringFind(dayBlock, "\"", endValuePos + 1);
+                            if(endQuoteEnd != -1)
+                            {
+                                endTime = StringSubstr(dayBlock, endValuePos + 1, endQuoteEnd - endValuePos - 1);
+                            }
+                        }
+                        else if(StringSubstr(dayBlock, endValuePos, 4) == "null")
+                        {
+                            endTime = "";
+                        }
+                    }
                 }
             }
+        }
+
+        switch(i)
+        {
+            case 0: cachedTradingHours.monday.start = startTime; cachedTradingHours.monday.end = endTime; break;
+            case 1: cachedTradingHours.tuesday.start = startTime; cachedTradingHours.tuesday.end = endTime; break;
+            case 2: cachedTradingHours.wednesday.start = startTime; cachedTradingHours.wednesday.end = endTime; break;
+            case 3: cachedTradingHours.thursday.start = startTime; cachedTradingHours.thursday.end = endTime; break;
+            case 4: cachedTradingHours.friday.start = startTime; cachedTradingHours.friday.end = endTime; break;
+            case 5: cachedTradingHours.saturday.start = startTime; cachedTradingHours.saturday.end = endTime; break;
+            case 6: cachedTradingHours.sunday.start = startTime; cachedTradingHours.sunday.end = endTime; break;
         }
     }
 
@@ -2745,7 +2801,7 @@ void SetTradingHoursForToday()
     }
 
     MqlDateTime dt;
-    TimeCurrent(dt);
+    GetCurrentEasternTime(dt);
 
     TradingWindow todayWindow;
     string dayName = GetDayOfWeekString(dt.day_of_week);
@@ -2829,7 +2885,7 @@ void CheckAndUpdateDailyTradingHours()
     }
 
     MqlDateTime dt;
-    TimeCurrent(dt);
+    GetCurrentEasternTime(dt);
 
     // Check if the day has changed
     if(lastDayChecked != dt.day_of_week)
@@ -2874,6 +2930,16 @@ string GetDayOfWeekString(int dayOfWeek)
         case 0: return "Sunday";
         default: return "Unknown";
     }
+}
+
+void GetCurrentEasternTime(MqlDateTime &easternTime)
+{
+    datetime serverNow = TimeCurrent();
+    int serverToEasternOffset = GetServerToEasternOffset(serverNow);
+    datetime easternNow = serverNow + (serverToEasternOffset * 3600);
+
+    // Convert the adjusted timestamp to full calendar fields (day/month/day_of_week).
+    TimeToStruct(easternNow, easternTime);
 }
 
 bool ParseTimeString(string timeStr, int &hour, int &minute)

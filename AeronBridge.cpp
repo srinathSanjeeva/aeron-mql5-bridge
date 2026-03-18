@@ -291,37 +291,63 @@ static void ensureDefaultMap()
     // - g_map["NQ"] = InstMap{ "TECH100", 0.25, 0.1 };
     // - g_map["YM"] = InstMap{ "DJ30", 1.0, 0.1 };
     // - g_map["MBT"] = InstMap{ "BTCUSD", 5.0, 0.01 };
+    // - g_map["GC"] = InstMap{ "XAUUSD", 0.1, 0.01 };
+    // - g_map["SI"] = InstMap{ "XAGUSD", 0.005, 0.01 };
     
-	// - Darwinex symbols conversion  : ES → SP500, NQ → NDX, YM → WS30
+	// - Darwinex symbols conversion  : ES → SP500, NQ → NDX, YM → WS30, 
     // - g_map["ES"] = InstMap{ "SP500", 0.25, 0.1 };
     // - g_map["NQ"] = InstMap{ "NDX", 0.25, 0.1 };
     // - g_map["YM"] = InstMap{ "WS30", 1.0, 0.1 };
+    // - g_map["GC"] = InstMap{ "XAUUSD", 0.1, 0.01 };
+    // - g_map["SI"] = InstMap{ "XAGUSD", 0.005, 0.01 };
     //   Conversion Formula: MT5_Points = (NT_Ticks × futTickSize) ÷ mt5PointSize
+    // - Forex symbols conversion: ES → SPX500, NQ → NAS100, YM → US30, DAX → GER40
+    // - g_map["ES"] = InstMap{ "SPX500", 0.25, 0.1 };
+    // - g_map["NQ"] = InstMap{ "NAS100", 0.25, 0.1 };
+    // - g_map["YM"] = InstMap{ "US30", 1.0, 0.1 };
+    // - g_map["DAX"] = InstMap{ "GER40", 1.0, 0.1 };
+    // - g_map["GC"] = InstMap{ "XAUUSD", 0.1, 0.1 };
+    // - g_map["SI"] = InstMap{ "XAGUSD", 0.005, 0.01 };
     //
     // ES (E-mini S&P 500):
     //   - NT: 0.25 per tick | MT5 Symbol: SPX500 | MT5 _Point: 0.1
     //   - Example: 50 ticks → (50 × 0.25) ÷ 0.1 = 125 MT5 points = 12.5 price units
     if (g_map.find("ES") == g_map.end())
-        g_map["ES"] = InstMap{ "SP500", 0.25, 0.1 };
+        g_map["ES"] = InstMap{ "SPX500", 0.25, 0.1 };
     
     // NQ (E-mini Nasdaq-100):
     //   - NT: 0.25 per tick | MT5 Symbol: TECH100 | MT5 _Point: 0.1
     //   - Example: 85 ticks → (85 × 0.25) ÷ 0.1 = 212.5 MT5 points = 21.25 price units
     //   - Desired: 85 ticks → 25.0 price units (adjusted futTickSize to match)
     if (g_map.find("NQ") == g_map.end())
-        g_map["NQ"] = InstMap{ "NDX", 0.25, 0.1 };
+        g_map["NQ"] = InstMap{ "NAS100", 0.25, 0.1 };
     
     // YM (E-mini Dow):
     //   - NT: 1.0 per tick | MT5 Symbol: DJ30 | MT5 _Point: 0.01
     //   - Example: 50 ticks → (50 × 1.0) ÷ 0.01 = 5000 MT5 points = 50.0 price units
     if (g_map.find("YM") == g_map.end())
-        g_map["YM"] = InstMap{ "WS30", 1.0, 0.1 };
+        g_map["YM"] = InstMap{ "US30", 1.0, 0.1 };
+
+    // DAX (Germany 40):
+    if (g_map.find("DAX") == g_map.end())
+        g_map["DAX"] = InstMap{ "GER40", 1.0, 0.1 };
 
     // MBT (Micro Bitcoin):
     //   - NT: 5.0 per tick | MT5 Symbol: BTCUSD | MT5 _Point: 0.01
     //   - Example: 20 ticks → (20 × 5.0) ÷ 0.01 = 10000 MT5 points = 100.0 price units
     if (g_map.find("MBT") == g_map.end())
         g_map["MBT"] = InstMap{ "BTCUSD", 5.0, 0.01 };
+
+    // GC (Gold): XAUUSD CFD with 0.01 point size, NT tick size 0.1 (10 USD move)
+    if (g_map.find("GC") == g_map.end())
+        g_map["GC"] = InstMap{ "XAUUSD", 0.1, 0.1 };
+
+    // SI (Silver):
+    // NT tick = 0.005 ($25)
+    // MT5 _Point = 0.001
+    // Example: 14 ticks → (14 × 0.005) ÷ 0.01 = 70 MT5 points = 0.070 price units
+    if (g_map.find("SI") == g_map.end())
+        g_map["SI"] = InstMap{ "XAGUSD", 0.005, 0.01 };
 }
 
 // ===============================

@@ -4,6 +4,18 @@
 //|                                             https://www.sanjeevas.com|
 //+------------------------------------------------------------------+
 
+// V20.10 Release - Dual Timeframe X1/X2 Bias-Trigger Architecture:
+// - Added X1 (higher timeframe) stochastic inputs: TimeframeX1, K/D/Slowing_X1
+// - Added X2 (lower timeframe) stochastic inputs: TimeframeX2, K/D/Slowing_X2
+// - X1 now defines directional bias (LONG/SHORT) using crossover events
+// - X2 now acts only as entry trigger, and only in active X1 bias direction
+// - Exit/flip rule updated: positions exit only when X1 flips bias
+// - On opposite X1 bias: close-and-wait mode (no immediate reverse entries)
+// - New entries after flip require X2 confirmation in new bias direction
+// - Immediate entry on load now follows X1 bias + X2 trigger alignment
+// - Confidence calculations for Aeron publishing now read from X2 indicator
+// - Previous single-timeframe behavior replaced by dual-timeframe state machine
+
 // V20.9.1 HOTFIX - Trading Hours API Enforcement:
 // - CRITICAL FIX: Removed early return in IsTradingAllowed() when EnableKillSwitch=false
 // - Trading hours from API are now ALWAYS enforced regardless of kill switch setting

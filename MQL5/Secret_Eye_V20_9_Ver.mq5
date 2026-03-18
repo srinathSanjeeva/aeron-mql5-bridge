@@ -3559,7 +3559,7 @@ void CheckKillSwitchPostTimeRecovery()
     if(estHour < 0) estHour += 24;
     if(estHour >= 24) estHour -= 24;
     
-    bool isPastKillTime = (estHour > currentEndHour) || (estHour == currentEndHour && time.min >= currentEndMinute);
+    bool isPastKillTime = (estHour > killSwitchHour) || (estHour == killSwitchHour && time.min >= killSwitchMinute);
     
     if(isPastKillTime && !scalpBuyOpened && !trendBuyOpened && !scalpSellOpened && !trendSellOpened)
     {
@@ -3567,7 +3567,7 @@ void CheckKillSwitchPostTimeRecovery()
         stopTradingForDay = true;
         
         Print("=== KILL SWITCH POST-TIME RECOVERY ===");
-        Print("EA restarted after kill switch time (", currentEndHour, ":", StringFormat("%02d", currentEndMinute), " EST/EDT)");
+        Print("EA restarted after kill switch time (", killSwitchHour, ":", StringFormat("%02d", killSwitchMinute), " EST/EDT)");
         Print("Current EST Time: ", estHour, ":", StringFormat("%02d", time.min));
         Print("No positions found - marking kill switch as executed and disabling trading");
         
